@@ -149,8 +149,11 @@ def encode_fact(content: str, entities: list[str], dim: int = 1024) -> "np.ndarr
     2. For each entity: bind(encode_atom(entity.lower(), dim), encode_atom("__hrr_role_entity__", dim))
     3. bundle all components together
 
-    This enables algebraic extraction:
-        unbind(fact, bind(entity, ROLE_ENTITY)) ≈ content_vector
+    Readout is by SIMILARITY against a bound component, not by unbind: the
+    result is a bundle, and unbind inverts bind, not bundle. Since bundling
+    produces a vector similar to each of its inputs:
+        similarity(fact, bind(entity, ROLE_ENTITY))          -> entity present?
+        similarity(fact, bind(encode_text(q), ROLE_CONTENT)) -> content match?
     """
     _require_numpy()
 
