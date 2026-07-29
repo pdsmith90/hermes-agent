@@ -1716,9 +1716,21 @@ def init_agent(
     # Memory provider plugin (external — one at a time, alongside built-in)
     # Reads memory.provider from config to select which plugin to activate.
     agent._memory_manager = None
-    if not skip_memory:
+    # Deliberately NOT gated on skip_memory. skip_memory exists so background
+    # and flush agents don't spin up the built-in MEMORY.md store (handled by
+    # the block above), but the external provider's tools — fact_store and
+    # fact_feedback — are exactly what a background/cron agent needs in order
+    # to write facts at all. Gating them here silently gives cron agents no
+    # memory tools.
+    if True:
         try:
-            _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
+            # Re-read from _agent_cfg rather than reusing mem_config: that name
+            # is only bound inside the block above, which is still gated, so it
+            # can be unbound here. The resulting NameError would be swallowed by
+            # the enclosing `except Exception` and the provider would silently
+            # never load.
+            _prov_mem_cfg = _agent_cfg.get("memory", {}) or {}
+            _mem_provider_name = _prov_mem_cfg.get("provider", "")
 
             if _mem_provider_name and _mem_provider_name.strip():
                 from agent.memory_manager import MemoryManager as _MemoryManager
