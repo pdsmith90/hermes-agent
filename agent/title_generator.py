@@ -137,9 +137,18 @@ def generate_title(
     language = _title_language()
     prompt = _TITLE_PROMPT_PINNED_LANGUAGE.format(language=language) if language else _TITLE_PROMPT
 
+    # Append Qwen's `/no_think` soft-switch. Reasoning models under
+    # `--reasoning auto` otherwise spend their full reasoning budget on a 3-7
+    # word title and blow past the request timeout, so titles silently never
+    # generate. Inert text for models that don't implement the switch.
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": f"User: {user_snippet}\n\nAssistant: {assistant_snippet}"},
+        {
+            "role": "user",
+            "content": (
+                f"User: {user_snippet}\n\nAssistant: {assistant_snippet}\n\n/no_think"
+            ),
+        },
     ]
 
     try:
