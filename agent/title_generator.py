@@ -386,9 +386,16 @@ def generate_title(
     # braces as few-shot examples, which format() would try to interpolate.
     prompt = _TITLE_PROMPT_TEMPLATE.replace("__LANGUAGE_RULE__", language_rule)
 
+    # Append Qwen's `/no_think` soft-switch. Reasoning models under
+    # `--reasoning auto` otherwise spend their full reasoning budget on a 3-7
+    # word title and blow past the request timeout, so titles silently never
+    # generate. Inert text for models that don't implement the switch.
     messages = [
         {"role": "system", "content": prompt},
-        {"role": "user", "content": user_snippet},
+        # Upstream now sends only the user snippet (assistant_snippet no longer
+        # exists), so this keeps upstream's shape and carries over just the
+        # fork's addition: the trailing /no_think soft-switch.
+        {"role": "user", "content": f"{user_snippet}\n\n/no_think"},
     ]
 
     try:
