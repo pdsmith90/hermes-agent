@@ -83,16 +83,81 @@ _TRUST_MAX       =  1.0
 
 # Entity extraction patterns
 _RE_CAPITALIZED  = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b')
-_RE_DOUBLE_QUOTE = re.compile(r'"([^"]+)"')
-_RE_SINGLE_QUOTE = re.compile(r"'([^']+)'")
+# Bounded: an unbounded span crosses newlines and swallows whole log records.
+_RE_DOUBLE_QUOTE = re.compile(r'"([^"\n]{1,200})"')
 _RE_AKA          = re.compile(
     r'(\w+(?:\s+\w+)*)\s+(?:aka|also known as)\s+(\w+(?:\s+\w+)*)',
     re.IGNORECASE,
 )
+# There is deliberately NO single-quote rule. An apostrophe inside a word
+# ("Earth's", "don't", "et al.'s") is not a quote delimiter, but a naive
+# r"'([^']+)'" treats it as one and captures everything up to the next
+# apostrophe anywhere later in the text — which produced multi-hundred-character
+# prose blobs. Every boundary-lookaround repair still leaks on ".'" and ")'",
+# and measured over a real corpus the rule yielded no candidate that ever
+# linked two facts, so it is removed rather than patched.
+
+# Identifier-shaped tokens: the class that actually joins facts, and the class
+# the other rules are structurally blind to (they cannot see a bare acronym,
+# CamelCase or hyphenated name). Compounds must carry an uppercase character so
+# "GRACE-FO"/"Gauss-Newton" match while "real-time"/"climate-driven" do not;
+# there is deliberately no bare-uppercase alternative, because [A-Z]{2,} matches
+# ALL-CAPS section markers (PAPER, LESSON, CONFIRMED) and would make them the
+# highest-degree nodes in the graph.
+_RE_IDENTIFIER = re.compile(
+    r'\b('
+    r'(?=[\w-]*[A-Z])[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+'  # GRACE-FO
+    r'|[A-Z][A-Za-z]*[0-9]+[A-Za-z0-9]*'                          # SGP4, ERA5
+    r'|[A-Z][a-z]+[A-Z][A-Za-z0-9]*'                              # LightRAG
+    r'|[a-z]+[A-Z][A-Za-z0-9]*'                                   # arXiv
+    r')(?::([\w.\-]*[\w\-]))?'                                    # arXiv:2607.19083
+)
+
+# Entity validation bounds. 40 is the length above which a real corpus contained
+# no entity linked to more than one fact — and joining facts is the entire
+# purpose of an entity here. The longest genuine multi-word name the rules
+# produce is well inside it.
+_ENTITY_MIN_LEN = 2
+_ENTITY_MAX_LEN = 40
+
+# A proper name never begins or ends with a function word. A capitalized span
+# that does is a sentence fragment ("The Gauss", "Uses Telemetry", "Profiles
+# Using") — what _RE_CAPITALIZED emits when it splits a longer phrase at an
+# interior lowercase word. Deliberately NOT unified with
+# FactRetriever._FTS_STOPWORDS: that one filters query tokens, this one rejects
+# name edges, and the two lists must be free to diverge.
+_EDGE_WORDS = frozenset("""
+a an the this that these those it its we they he she
+is are was were be been do does did can could will would shall should may might must
+of in on at to for from by with via per as into over under between during about
+and or but so not no if when while then because which what how why where
+use uses used using run runs ran add adds added see also new only all both more most now
+""".split())
+
+# The tail a contraction/possessive leaves behind when a quote span opened on
+# its apostrophe ("Earth's" -> "s ...", "don't" -> "t ..."). The rules above can
+# no longer produce these, but rows written before the fix can, and the short
+# ones sit inside the length bound where nothing else catches them. Matched
+# lowercase and only as a leading word, so "T Tauri" / "B Ring" are unaffected.
+_CONTRACTION_HEADS = frozenset(("s", "t", "ll", "re", "ve", "d", "m"))
 
 
 def _clamp_trust(value: float) -> float:
     return max(_TRUST_MIN, min(_TRUST_MAX, value))
+
+
+def _is_entity_like(name: str) -> bool:
+    """True if a candidate looks like a name rather than a fragment of prose."""
+    if not (_ENTITY_MIN_LEN <= len(name) <= _ENTITY_MAX_LEN):
+        return False
+    words = name.split()
+    if len(words) > 1 and (
+        words[0].lower() in _EDGE_WORDS or words[-1].lower() in _EDGE_WORDS
+    ):
+        return False
+    if len(words) > 1 and words[0] in _CONTRACTION_HEADS:
+        return False
+    return True
 
 
 class MemoryStore:
@@ -450,8 +515,11 @@ class MemoryStore:
         Rules applied (in order):
         1. Capitalized multi-word phrases  e.g. "John Doe"
         2. Double-quoted terms             e.g. "Python"
-        3. Single-quoted terms             e.g. 'pytest'
-        4. AKA patterns                    e.g. "Guido aka BDFL" -> two entities
+        3. AKA patterns                    e.g. "Guido aka BDFL" -> two entities
+        4. Identifier tokens               e.g. GRACE-FO, SGP4, arXiv:2607.19083
+
+        Every candidate must satisfy _is_entity_like, so prose spans, error
+        strings and sentence fragments never become entities.
 
         Returns a deduplicated list preserving first-seen order.
         """
@@ -459,8 +527,8 @@ class MemoryStore:
         candidates: list[str] = []
 
         def _add(name: str) -> None:
-            stripped = name.strip()
-            if stripped and stripped.lower() not in seen:
+            stripped = name.strip().strip('.,;:')
+            if _is_entity_like(stripped) and stripped.lower() not in seen:
                 seen.add(stripped.lower())
                 candidates.append(stripped)
 
@@ -470,12 +538,13 @@ class MemoryStore:
         for m in _RE_DOUBLE_QUOTE.finditer(text):
             _add(m.group(1))
 
-        for m in _RE_SINGLE_QUOTE.finditer(text):
-            _add(m.group(1))
-
         for m in _RE_AKA.finditer(text):
             _add(m.group(1))
             _add(m.group(2))
+
+        # group(0), not group(1): keeps the optional ":suffix" (arXiv:2607.19083).
+        for m in _RE_IDENTIFIER.finditer(text):
+            _add(m.group(0))
 
         return candidates
 
@@ -484,20 +553,29 @@ class MemoryStore:
 
         Returns the entity_id.
         """
-        # Exact name match
+        # Exact name match. '=' with an explicit NOCASE collation, not LIKE:
+        # LIKE interprets '_' and '%' inside the CANDIDATE as wildcards, so a
+        # name like "model_spec" silently resolved to whichever row the index
+        # scan reached first — a different entity. _compute_hrr_vector then
+        # re-reads that wrong name from the DB and encodes it into the fact
+        # vector. NOCASE preserves the case-insensitivity LIKE gave for free;
+        # a bare '=' would fork every entity by capitalisation.
         row = self._conn.execute(
-            "SELECT entity_id FROM entities WHERE name LIKE ?", (name,)
+            "SELECT entity_id FROM entities WHERE name = ? COLLATE NOCASE",
+            (name,),
         ).fetchone()
         if row is not None:
             return int(row["entity_id"])
 
-        # Search aliases — aliases stored as comma-separated; use LIKE with % boundaries
+        # Search aliases — aliases stored as comma-separated; use LIKE with %
+        # boundaries. ESCAPE is required here for the same reason: the
+        # parameter is user data, not a pattern.
         alias_row = self._conn.execute(
             """
             SELECT entity_id FROM entities
-            WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%'
+            WHERE ',' || aliases || ',' LIKE '%,' || ? || ',%' ESCAPE '\\'
             """,
-            (name,),
+            (name.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_'),),
         ).fetchone()
         if alias_row is not None:
             return int(alias_row["entity_id"])
