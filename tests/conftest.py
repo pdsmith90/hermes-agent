@@ -717,6 +717,59 @@ def _state_db_write_guard(request, monkeypatch):
     yield
 
 
+# ── Cron execution-ledger isolation ───────────────────────────────────────
+#
+# Same import-time-capture defect documented for ``hermes_state``'s
+# ``DEFAULT_DB_PATH`` below, different module. ``cron/executions.py`` resolves
+#
+#     EXECUTIONS_FILE = get_hermes_home().resolve() / "cron" / "executions.db"
+#
+# at module scope. pytest imports it during COLLECTION — before
+# ``_hermetic_environment`` redirects ``HERMES_HOME`` — so the constant stays
+# pinned to the developer's REAL ``~/.hermes/cron/executions.db``. Tests that
+# record a cron attempt then append audit rows to the LIVE ledger under
+# fixture job ids (``j1``, ``monitor-job``, ``guard-sessiondb-hang``, ...),
+# interleaved with genuine history, and dump mocked-API tracebacks into the
+# real ``logs/errors.log``. Both then read as production history during
+# incident triage.
+#
+# Reproduce: ``scripts/run_tests.sh tests/cron/`` appended 39 rows to the real
+# ledger before this fixture existed, 0 after. It does NOT reproduce when a
+# single file is run on its own — the leak needs whatever import order the
+# per-file runner produces, so per-file isolation alone does not cover it.
+#
+# ``tests/cron/test_execution_ledger.py`` already re-points the ledger
+# per-test via its own ``_point_ledger`` helper; the tests that leaked are the
+# ones exercising the scheduler without it. Re-resolving centrally covers
+# every test file instead of requiring each author to remember.
+#
+# Scope note: ``cron/jobs.py`` has the same module-scope constants
+# (``HERMES_DIR``/``JOBS_FILE``/...) but is already safe — the runtime reads
+# through ``_current_cron_store()``, which re-resolves HERMES_HOME per call,
+# and ``TestLateEnvRepointScopesStore`` pins the constants as a deliberately
+# un-repointed compatibility surface. Do not "fix" those here; it breaks that
+# contract.
+@pytest.fixture(autouse=True)
+def _isolate_cron_execution_ledger(_hermetic_environment, monkeypatch):
+    """Re-point ``cron.executions.EXECUTIONS_FILE`` at the per-test HERMES_HOME.
+
+    Depends on ``_hermetic_environment`` so HERMES_HOME is already redirected.
+    Tests that point the ledger somewhere else themselves still win — their
+    ``monkeypatch.setattr`` runs after this fixture.
+    """
+    try:
+        import cron.executions as _executions
+        from hermes_constants import get_hermes_home
+    except Exception:
+        return
+    monkeypatch.setattr(
+        _executions,
+        "EXECUTIONS_FILE",
+        get_hermes_home().resolve() / "cron" / "executions.db",
+        raising=False,
+    )
+
+
 # ── Module-level state reset — replaced by per-file process isolation ──────
 #
 # Each test FILE runs in a freshly-spawned ``python -m pytest <file>``
