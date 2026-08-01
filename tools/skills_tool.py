@@ -839,10 +839,46 @@ def skills_list(category: str = None, task_id: str = None) -> str:
         # Sort by category then name
         all_skills = _sort_skills(all_skills)
 
+        # Annotate pinned skills. The background review fork is told pinned
+        # skills are off-limits but had no way to tell which ones are pinned,
+        # so it kept composing patches that the write guard then refused —
+        # wasted turns in a budgeted cron run, repeatedly on the same skills.
+        #
+        # Read fresh rather than inside _find_all_skills(): pin state lives in
+        # .usage.json, which is not part of that function's cache signature.
+        # Emitted only when True — a false flag on every unpinned skill is pure
+        # token cost.
+        #
+        # load_usage() once, not get_record() per skill: get_record re-reads and
+        # re-parses the whole file on every call, which over ~100 skills costs
+        # more than the rest of skills_list put together. Indexing the loaded
+        # map is equivalent for this predicate — get_record backfills a missing
+        # record with pinned=False, which is the same falsy answer .get() gives
+        # — so the flag still matches what _background_review_write_guard does.
+        pinned_count = 0
+        try:
+            from tools import skill_usage
+
+            usage = skill_usage.load_usage()
+            for skill in all_skills:
+                if usage.get(skill.get("name", ""), {}).get("pinned"):
+                    skill["pinned"] = True
+                    pinned_count += 1
+        except Exception:
+            logger.debug("pinned annotation failed for skills_list", exc_info=True)
+
         # Extract unique categories
         categories = sorted(
             {s.get("category") for s in all_skills if s.get("category")}
         )
+
+        hint = "Use skill_view(name) to see full content, tags, and linked files"
+        if pinned_count:
+            hint += (
+                f". {pinned_count} skill(s) marked \"pinned\": true — autonomous "
+                "background maintenance cannot write to those; only the user, "
+                "in a foreground session, can change them"
+            )
 
         return json.dumps(
             {
@@ -850,7 +886,7 @@ def skills_list(category: str = None, task_id: str = None) -> str:
                 "skills": all_skills,
                 "categories": categories,
                 "count": len(all_skills),
-                "hint": "Use skill_view(name) to see full content, tags, and linked files",
+                "hint": hint,
             },
             ensure_ascii=False,
         )
