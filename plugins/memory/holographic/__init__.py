@@ -64,7 +64,18 @@ FACT_STORE_SCHEMA = {
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
             "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'."},
-            "category": {"type": "string", "enum": ["user_pref", "project", "tool", "general"]},
+            # Free-form on purpose: 'add' stores whatever is passed, so an enum
+            # here only misleads. The previous four-value enum went stale as
+            # soon as callers invented categories, which is immediately —
+            # leaving the schema declaring most stored rows invalid.
+            "category": {
+                "type": "string",
+                "description": (
+                    "Free-form label; defaults to 'general'. Common: paper, "
+                    "researched, activity, lesson, project, synthesis, "
+                    "hypothesis, open-question, user_pref, tool."
+                ),
+            },
             "tags": {"type": "string", "description": "Comma-separated tags."},
             "trust_delta": {"type": "number", "description": "Trust adjustment for 'update'."},
             "min_trust": {"type": "number", "description": "Minimum trust filter (default: 0.3)."},
@@ -73,6 +84,106 @@ FACT_STORE_SCHEMA = {
         "required": ["action"],
     },
 }
+
+# The schema above can only express ``required: ["action"]`` — nine actions
+# share one flat property bag, so JSON Schema cannot state that 'related' needs
+# 'entity' while 'update' needs 'fact_id'. That contract lived only in prose,
+# and models routinely got it wrong. Three shapes recur, in frequency order:
+# 'update' with content/trust_delta but no fact_id; 'search' passing 'entity';
+# 'related' passing 'fact_id'. The old ``except KeyError`` reported just the
+# missing key, which is not enough to self-correct from, so unattended runs
+# repeated the same malformed call night after night.
+#
+# These tables drive a pre-dispatch check that names the action, the missing
+# argument, and the action that would have worked.
+
+_ACTION_REQUIRED_ARGS = {
+    "add": ("content",),
+    "search": ("query",),
+    "probe": ("entity",),
+    "related": ("entity",),
+    "reason": ("entities",),
+    "contradict": (),
+    "update": ("fact_id",),
+    "remove": ("fact_id",),
+    "list": (),
+}
+
+_ARG_MEANING = {
+    "content": "the fact text to store",
+    "query": "free-text keywords to match",
+    "entity": "an entity NAME, e.g. \"Postgres\"",
+    "entities": "a non-empty list of entity names",
+    "fact_id": "the integer id of an existing fact",
+}
+
+# Corrections for the confusions actually observed in the cron logs, keyed by
+# (action, argument the model supplied instead).
+_ARG_CONFUSIONS = {
+    ("search", "entity"): (
+        "For entity lookups use action='probe' (all facts about an entity) or "
+        "action='related' (structural adjacency). action='search' matches free "
+        "text only."
+    ),
+    ("probe", "fact_id"): (
+        "'probe' looks up entities, not facts. Facts are linked to entities "
+        "automatically when added, so probe an entity name from the fact's "
+        "content instead."
+    ),
+    ("related", "fact_id"): (
+        "'related' looks up entities, not facts. Facts are linked to entities "
+        "automatically when added, so probe an entity name from the fact's "
+        "content instead."
+    ),
+}
+
+# Fallback guidance when the action needs an id the model does not have. This
+# is the single most common failure: there is no update-by-content path, so a
+# model wanting to revise a fact has to look the id up first.
+_ID_LOOKUP_HINT = (
+    "Look it up first — action='search' or action='probe' returns a fact_id "
+    "for every result. There is no update-by-content path."
+)
+
+
+def _validate_action_args(action, args):
+    """Return an error string when *args* is missing what *action* requires.
+
+    Treats empty values as missing: ``entities=[]`` is as unusable as no
+    ``entities`` key at all.
+    """
+    required = _ACTION_REQUIRED_ARGS.get(action)
+    if not required:
+        return None
+
+    missing = [
+        name for name in required
+        if args.get(name) is None or args.get(name) == "" or args.get(name) == []
+    ]
+    if not missing:
+        return None
+
+    name = missing[0]
+    supplied = sorted(k for k in args if k != "action" and args.get(k) is not None)
+
+    parts = [
+        f"fact_store action='{action}' requires '{name}' "
+        f"({_ARG_MEANING.get(name, 'see the tool schema')})."
+    ]
+    parts.append(
+        f"You supplied: {', '.join(supplied)}." if supplied
+        else "You supplied no other arguments."
+    )
+    for wrong in supplied:
+        hint = _ARG_CONFUSIONS.get((action, wrong))
+        if hint:
+            parts.append(hint)
+            break
+    else:
+        if name == "fact_id":
+            parts.append(_ID_LOOKUP_HINT)
+    return " ".join(parts)
+
 
 FACT_FEEDBACK_SCHEMA = {
     "name": "fact_feedback",
@@ -274,6 +385,10 @@ class HolographicMemoryProvider(MemoryProvider):
             store = self._store
             retriever = self._retriever
 
+            arg_error = _validate_action_args(action, args)
+            if arg_error:
+                return tool_error(arg_error)
+
             if action == "add":
                 fact_id = store.add_fact(
                     args["content"],
@@ -308,11 +423,9 @@ class HolographicMemoryProvider(MemoryProvider):
                 return json.dumps({"results": results, "count": len(results)})
 
             elif action == "reason":
-                entities = args.get("entities", [])
-                if not entities:
-                    return tool_error("reason requires 'entities' list")
+                # Emptiness is caught by _validate_action_args above.
                 results = retriever.reason(
-                    entities,
+                    args["entities"],
                     category=args.get("category"),
                     limit=int(args.get("limit", 10)),
                 )

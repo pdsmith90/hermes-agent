@@ -1698,10 +1698,15 @@ SKILL_MANAGE_SCHEMA = {
         "plus '...' in the system prompt skill index; longer text is visible "
         "via skills_list/skill_view. Keep the trigger self-contained in that "
         "first 57-char window: 'Use when <trigger>. <one-line behavior>.'\n\n"
-        "Pinned skills are protected from deletion only — skill_manage(action='delete') "
-        "will refuse with a message pointing the user to `hermes curator unpin <name>`. "
-        "Patches and edits go through on pinned skills so you can still improve them as "
-        "pitfalls come up; pin only guards against irrecoverable loss."
+        "Pinned skills (\"pinned\": true in skills_list): in a foreground, "
+        "user-present session pin guards against irrecoverable loss only — "
+        "skill_manage(action='delete') refuses and points the user to "
+        "`hermes curator unpin <name>`, while patches and edits go through so "
+        "you can still improve them as pitfalls come up. In the autonomous "
+        "background review fork there is no user to consent, so pin blocks "
+        "every write including patch and edit; check skills_list for the flag "
+        "and pick an unpinned skill instead of composing a patch that will be "
+        "refused."
     ),
     "parameters": {
         "type": "object",
