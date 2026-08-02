@@ -1827,6 +1827,31 @@ def skill_view(
             "_source_path": str(skill_md),
         }
 
+        # Flag a pin here too, not just in skills_list. The background review
+        # fork's top-priority instruction is to patch a skill already in play,
+        # which it reaches straight from the transcript via skill_view — it
+        # never lists. Annotating only the enumeration path left that route
+        # blind, so the fork kept reading a pinned skill, composing a patch,
+        # and being refused by _background_review_write_guard. Same predicate
+        # the guard evaluates; emitted only when True.
+        try:
+            from tools import skill_usage
+
+            if skill_usage.get_record(skill_name).get("pinned"):
+                result["pinned"] = True
+                result["pinned_note"] = (
+                    f"'{skill_name}' is PINNED. Autonomous background "
+                    "maintenance cannot write to it — patch and edit are "
+                    "refused, not just delete. Do not compose a patch for "
+                    "this skill; pick an unpinned one or report the needed "
+                    "change instead. Only the user, in a foreground session, "
+                    "can change it."
+                )
+        except Exception:
+            logger.debug(
+                "pinned annotation failed for skill_view(%s)", skill_name, exc_info=True
+            )
+
         setup_help = next((e["help"] for e in required_env_vars if e.get("help")), None)
         if setup_help:
             result["setup_help"] = setup_help
