@@ -1500,6 +1500,24 @@ class TestDeliverOriginUnresolvableIsLocal:
         assert self._deliver(job, monkeypatch) is None
 
 
+class TestDeliverNoneIsSilentNoop:
+    """deliver=none is an explicit no-delivery choice, not a failure.
+
+    Jobs stored with ``deliver: none`` used to fall through target
+    resolution and record "no delivery target resolved for deliver=none"
+    as a delivery error (surfaced as a warning in ``cron list``) on every
+    run.  _deliver_result must return None without attempting resolution.
+    """
+
+    def test_none_returns_none_without_error(self):
+        job = {"id": "quiet-job", "deliver": "none"}
+        assert _deliver_result(job, "output") is None
+
+    def test_none_resolves_no_targets(self):
+        from cron.scheduler import _resolve_delivery_targets
+        assert _resolve_delivery_targets({"id": "quiet-job", "deliver": "none"}) == []
+
+
 class TestSendMediaTimeoutCancelsFuture:
     """Same orphan-coroutine guarantee for _send_media_via_adapter's
     future.result(timeout=30) call. If this times out mid-batch, the

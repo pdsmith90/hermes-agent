@@ -1435,7 +1435,7 @@ def _resolve_delivery_targets(job: dict) -> List[dict]:
     existing dedup pass.
     """
     deliver = _normalize_deliver_value(job.get("deliver", "local"))
-    if deliver == "local":
+    if deliver in ("local", "none"):
         return []
 
     raw_parts = [p.strip() for p in deliver.split(",") if p.strip()]
@@ -1616,8 +1616,11 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     targets = _resolve_delivery_targets(job)
     if not targets:
         deliver_value = _normalize_deliver_value(job.get("deliver", "local"))
-        if deliver_value == "local":
-            return None  # local-only jobs don't deliver — not a failure
+        if deliver_value in ("local", "none"):
+            # local/none jobs don't deliver — an explicit no-delivery choice,
+            # not a failure (deliver=none used to log "no delivery target
+            # resolved" as a delivery error on every run).
+            return None
         # deliver=origin with no resolvable origin and no configured home
         # channels: treat as local rather than reporting an error.  CLI-created
         # jobs never capture a {platform, chat_id} origin, so failing here would
