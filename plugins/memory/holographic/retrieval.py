@@ -36,7 +36,9 @@ class FactRetriever:
         hrr_dim: int = 1024,
         rerank_url: str = "",
         rerank_model: str = "qwen3-rerank",
-        rerank_timeout: float = 5.0,
+        rerank_timeout: float = 8.0,
+        rerank_max_query_chars: int = 1500,
+        rerank_max_doc_chars: int = 3000,
     ):
         self.store = store
         self.half_life = temporal_decay_half_life
@@ -49,6 +51,14 @@ class FactRetriever:
         self.rerank_url = rerank_url or os.environ.get("HERMES_RERANK_URL", "")
         self.rerank_model = rerank_model
         self.rerank_timeout = rerank_timeout
+        # A reranker server has a hard per-sequence cap (llama.cpp RANK pooling
+        # cannot split a sequence across ubatches). The QUERY is the term that
+        # actually overruns it: prefetch() passes the caller's whole turn text,
+        # which can be thousands of tokens, while stored facts are far smaller.
+        # Truncating costs nothing — a cross-encoder judges relevance from the
+        # head of the query — and turns a hard failure into a bounded request.
+        self.rerank_max_query_chars = rerank_max_query_chars
+        self.rerank_max_doc_chars = rerank_max_doc_chars
 
         # Auto-redistribute weights if numpy unavailable
         if hrr_weight > 0 and not hrr._HAS_NUMPY:
@@ -171,7 +181,11 @@ class FactRetriever:
         a down or slow reranker must degrade to the blend, not break retrieval.
         """
         payload = json.dumps(
-            {"model": self.rerank_model, "query": query, "documents": documents}
+            {
+                "model": self.rerank_model,
+                "query": query[: self.rerank_max_query_chars],
+                "documents": [d[: self.rerank_max_doc_chars] for d in documents],
+            }
         ).encode()
         try:
             req = urllib.request.Request(
