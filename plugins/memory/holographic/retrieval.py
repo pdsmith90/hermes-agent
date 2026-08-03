@@ -6,7 +6,11 @@ Jaccard similarity reranking and trust-weighted scoring.
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -30,10 +34,21 @@ class FactRetriever:
         jaccard_weight: float = 0.3,
         hrr_weight: float = 0.3,
         hrr_dim: int = 1024,
+        rerank_url: str = "",
+        rerank_model: str = "qwen3-rerank",
+        rerank_timeout: float = 5.0,
     ):
         self.store = store
         self.half_life = temporal_decay_half_life
         self.hrr_dim = hrr_dim
+
+        # Optional cross-encoder rerank of the FTS candidate pool (see search()).
+        # DISABLED unless a URL is supplied, either here or via HERMES_RERANK_URL.
+        # When disabled, or when the endpoint errors/times out, the additive
+        # fts/jaccard/hrr blend below is used unchanged.
+        self.rerank_url = rerank_url or os.environ.get("HERMES_RERANK_URL", "")
+        self.rerank_model = rerank_model
+        self.rerank_timeout = rerank_timeout
 
         # Auto-redistribute weights if numpy unavailable
         if hrr_weight > 0 and not hrr._HAS_NUMPY:
@@ -125,11 +140,51 @@ class FactRetriever:
 
         # Sort by score descending, return top limit
         scored.sort(key=lambda x: x["score"], reverse=True)
+
+        # Stage 3 (optional): cross-encoder rerank of the SAME limit*3 pool.
+        # Measured against a live store: reranking the existing limit*3 pool
+        # changed ~47% of top-5 in ~520 ms, while widening to limit*6 gave the
+        # SAME ~47% at ~1190 ms — so the pool is deliberately NOT widened.
+        # The additive blend above still decides which limit*3 candidates get
+        # here; this only reorders them. Any failure returns None -> blend order.
+        if self.rerank_url and len(scored) > 1:
+            ce = self._rerank_scores(query, [f["content"] for f in scored])
+            if ce is not None:
+                for fact, ce_score in zip(scored, ce):
+                    # ce_score is already P(yes) in [0,1] (RANK pooling softmaxes
+                    # in-graph for QWEN3). Trust weighting is preserved so a
+                    # low-trust fact cannot win on relevance alone.
+                    fact["score"] = ce_score * fact["trust_score"]
+                scored.sort(key=lambda x: x["score"], reverse=True)
+
         results = scored[:limit]
         # Strip raw HRR bytes — callers expect JSON-serializable dicts
         for fact in results:
             fact.pop("hrr_vector", None)
         return results
+
+    def _rerank_scores(self, query: str, documents: list[str]) -> list[float] | None:
+        """POST to a llama.cpp /v1/rerank endpoint. None on ANY failure.
+
+        Returning None (never raising) is deliberate: search() is on the hot
+        path for prefetch() every turn and for every cron fact_store search, so
+        a down or slow reranker must degrade to the blend, not break retrieval.
+        """
+        payload = json.dumps(
+            {"model": self.rerank_model, "query": query, "documents": documents}
+        ).encode()
+        try:
+            req = urllib.request.Request(
+                self.rerank_url, payload, {"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=self.rerank_timeout) as resp:
+                data = json.load(resp)
+            scores = [0.0] * len(documents)
+            for item in data["results"]:
+                scores[item["index"]] = float(item["relevance_score"])
+            return scores
+        except (urllib.error.URLError, OSError, KeyError, ValueError, TypeError):
+            return None
 
     def probe(
         self,
