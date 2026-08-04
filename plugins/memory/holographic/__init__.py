@@ -49,6 +49,8 @@ FACT_STORE_SCHEMA = {
         "• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
         "• contradict — Memory hygiene: find facts making conflicting claims.\n"
+        "• get — Exact fetch of ONE fact by fact_id (verify a write landed; "
+        "search cannot prove absence).\n"
         "• update/remove/list — CRUD operations.\n\n"
         "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
     ),
@@ -57,13 +59,13 @@ FACT_STORE_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "search", "probe", "related", "reason", "contradict", "update", "remove", "list"],
+                "enum": ["add", "search", "probe", "related", "reason", "contradict", "get", "update", "remove", "list"],
             },
             "content": {"type": "string", "description": "Fact content (required for 'add')."},
             "query": {"type": "string", "description": "Search query (required for 'search')."},
             "entity": {"type": "string", "description": "Entity name for 'probe'/'related'."},
             "entities": {"type": "array", "items": {"type": "string"}, "description": "Entity names for 'reason'."},
-            "fact_id": {"type": "integer", "description": "Fact ID for 'update'/'remove'."},
+            "fact_id": {"type": "integer", "description": "Fact ID for 'get'/'update'/'remove'."},
             # Free-form on purpose: 'add' stores whatever is passed, so an enum
             # here only misleads. The previous four-value enum went stale as
             # soon as callers invented categories, which is immediately —
@@ -104,6 +106,7 @@ _ACTION_REQUIRED_ARGS = {
     "related": ("entity",),
     "reason": ("entities",),
     "contradict": (),
+    "get": ("fact_id",),
     "update": ("fact_id",),
     "remove": ("fact_id",),
     "list": (),
@@ -437,6 +440,16 @@ class HolographicMemoryProvider(MemoryProvider):
                     limit=int(args.get("limit", 10)),
                 )
                 return json.dumps({"results": results, "count": len(results)})
+
+            elif action == "get":
+                fact = store.get_fact(int(args["fact_id"]))
+                # A missing fact is a RESULT, not an error — the caller is
+                # usually verifying whether a claimed write landed.
+                if fact is None:
+                    return json.dumps(
+                        {"found": False, "fact": None, "fact_id": int(args["fact_id"])}
+                    )
+                return json.dumps({"found": True, "fact": fact})
 
             elif action == "update":
                 updated = store.update_fact(
