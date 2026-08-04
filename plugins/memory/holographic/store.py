@@ -417,6 +417,22 @@ class MemoryStore:
 
             return True
 
+    def get_fact(self, fact_id: int) -> dict | None:
+        """Fetch one fact by id, or None if it does not exist.
+
+        Exact lookup — no ranking, no trust floor, no retrieval-count bump.
+        This is the verification path: ranked search cannot prove a fact is
+        absent (a low-ranked or sub-min_trust row simply doesn't surface).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT fact_id, content, category, tags, trust_score,"
+                " retrieval_count, helpful_count, created_at, updated_at"
+                " FROM facts WHERE fact_id = ?",
+                (fact_id,),
+            ).fetchone()
+            return self._row_to_dict(row) if row else None
+
     def remove_fact(self, fact_id: int) -> bool:
         """Delete a fact and its entity links. Returns True if the row existed."""
         with self._lock:

@@ -169,3 +169,50 @@ def test_category_schema_does_not_contradict_what_add_accepts(provider):
             provider._handle_fact_store({"action": "list", "category": name})
         )
         assert stored["count"] == 1, f"category {name!r} did not round-trip"
+
+
+# -- action=get: exact lookup by id (the verification path) ----------------
+#
+# Ranked search cannot prove a fact is ABSENT — a low-ranked or sub-min_trust
+# row simply doesn't surface, which made the morning briefing's write
+# spot-checks report false "claimed write did not land" flags (2026-08-04:
+# fids 747/755 flagged missing while sitting in the table). 'get' is the
+# side-effect-free existence check those spot-checks need.
+
+
+def test_get_without_fact_id_is_rejected_with_lookup_hint(provider):
+    err = _err(provider, {"action": "get"})
+    assert "get" in err and "fact_id" in err
+
+
+def test_get_returns_the_exact_fact(provider):
+    added = json.loads(provider._handle_fact_store(
+        {"action": "add", "content": "Postgres runs on port 5432",
+         "category": "project", "tags": "infra"}
+    ))
+    fid = added["fact_id"]
+    result = json.loads(provider._handle_fact_store({"action": "get", "fact_id": fid}))
+    assert result["found"] is True
+    assert result["fact"]["fact_id"] == fid
+    assert result["fact"]["content"] == "Postgres runs on port 5432"
+    assert result["fact"]["category"] == "project"
+
+
+def test_get_missing_fact_reports_found_false_not_error(provider):
+    """Absence is a result the caller acts on, not a tool failure."""
+    result = json.loads(provider._handle_fact_store({"action": "get", "fact_id": 999999}))
+    assert "error" not in result
+    assert result["found"] is False
+    assert result["fact"] is None
+
+
+def test_get_ignores_the_search_trust_floor(provider):
+    """A decayed fact is invisible to default search but must still 'get'."""
+    added = json.loads(provider._handle_fact_store(
+        {"action": "add", "content": "decayed zombie fact", "category": "hypothesis"}
+    ))
+    fid = added["fact_id"]
+    provider._handle_fact_store({"action": "update", "fact_id": fid, "trust_delta": -0.4})
+    result = json.loads(provider._handle_fact_store({"action": "get", "fact_id": fid}))
+    assert result["found"] is True
+    assert result["fact"]["trust_score"] < 0.3
