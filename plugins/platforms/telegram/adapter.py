@@ -2591,6 +2591,29 @@ class TelegramAdapter(BasePlatformAdapter):
         BASE_DELAY = 5
         MAX_DELAY = 60
 
+        # If the system resolver itself is failing (nodename nor servname),
+        # the entire network is down — don't burn a retry on this.  Mac
+        # sleep/wake cycles can last hours and should not exhaust the retry
+        # budget; only count retries when the network is confirmed up but
+        # Telegram specifically fails.  Returning here is safe because PTB's
+        # polling loop stays alive and keeps calling the error callback, and
+        # the heartbeat/pending-updates probes cover the wedge case.
+        error_str = str(error).lower()
+        is_system_dns_down = (
+            "nodename nor servname" in error_str
+            or "name or service not known" in error_str
+            or "temporary failure in name resolution" in error_str
+        )
+        if is_system_dns_down:
+            logger.debug(
+                "[%s] System DNS appears down (network offline); not counting retry. Error: %s",
+                self.name, _redact_telegram_error_text(error),
+            )
+            # Still back off but don't count toward the fatal limit
+            self._send_path_degraded = True
+            await asyncio.sleep(MAX_DELAY)
+            return
+
         self._polling_network_error_count += 1
         self._send_path_degraded = True
         attempt = self._polling_network_error_count
