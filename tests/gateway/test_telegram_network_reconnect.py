@@ -686,3 +686,105 @@ async def test_disconnect_advances_past_cancellation_swallowing_lifecycle(monkey
 
     release.set()
     await asyncio.wait({wedged}, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_system_dns_down_does_not_count_retry_or_restart_polling():
+    """
+    A system-DNS failure (Mac sleep/wake, WiFi off) must not burn the network
+    retry budget and must not trigger a polling restart.
+
+    When the host sleeps for hours, the OS resolver fails with
+    ``nodename nor servname`` (macOS) or ``name or service not known`` /
+    ``temporary failure in name resolution`` (Linux).  The reconnect ladder
+    counts every error toward MAX_NETWORK_RETRIES and escalates to a
+    retryable-fatal gateway restart at the cap — so a long offline window
+    (or a slow WiFi reconnect on wake) can restart the gateway needlessly.
+    These errors are not Telegram's fault; only count retries when the
+    network is confirmed up but Telegram specifically fails.
+    """
+    adapter = _make_adapter()
+    adapter._polling_network_error_count = 0
+
+    mock_updater = MagicMock()
+    mock_updater.running = True
+    mock_updater.stop = AsyncMock()
+    mock_updater.start_polling = AsyncMock()
+
+    mock_app = MagicMock()
+    mock_app.updater = mock_updater
+    adapter._app = mock_app
+    adapter._drain_polling_connections = AsyncMock()
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await adapter._handle_polling_network_error(
+            OSError("[Errno 8] nodename nor servname provided, or not known")
+        )
+
+    # The retry budget must be untouched and polling must not be restarted.
+    assert adapter._polling_network_error_count == 0
+    assert adapter._send_path_degraded is True
+    mock_updater.stop.assert_not_awaited()
+    adapter._drain_polling_connections.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_system_dns_down_at_retry_edge_does_not_escalate_to_fatal():
+    """
+    Even at the retry-cap edge, a DNS-down error must not escalate to a
+    retryable-fatal gateway restart.
+
+    A Mac that sleeps at the wrong moment (e.g. after several genuine
+    Telegram outages) must not be killed by the wake-up DNS failures; the
+    budget only escalates on confirmed-up-network errors.
+    """
+    adapter = _make_adapter()
+    adapter._polling_network_error_count = 10  # at the edge of MAX_NETWORK_RETRIES
+
+    mock_updater = MagicMock()
+    mock_updater.running = True
+    mock_updater.stop = AsyncMock()
+    mock_updater.start_polling = AsyncMock()
+
+    mock_app = MagicMock()
+    mock_app.updater = mock_updater
+    adapter._app = mock_app
+    adapter._drain_polling_connections = AsyncMock()
+    adapter._set_fatal_error = MagicMock()
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await adapter._handle_polling_network_error(
+            OSError("[Errno 8] nodename nor servname provided, or not known")
+        )
+
+    adapter._set_fatal_error.assert_not_called()
+    assert adapter._polling_network_error_count == 10
+
+
+@pytest.mark.asyncio
+async def test_real_network_error_still_counts_and_runs_ladder():
+    """
+    A genuine network error (network up, Telegram unreachable) must still
+    count toward the retry budget and run the reconnect ladder — the DNS
+    guard must not suppress real outages.
+    """
+    adapter = _make_adapter()
+    adapter._polling_network_error_count = 0
+
+    mock_updater = MagicMock()
+    mock_updater.running = False
+    mock_updater.start_polling = AsyncMock()
+
+    mock_app = MagicMock()
+    mock_app.updater = mock_updater
+    adapter._app = mock_app
+    adapter._drain_polling_connections = AsyncMock()
+    adapter._start_polling_once = AsyncMock()
+
+    with patch("asyncio.sleep", new_callable=AsyncMock):
+        await adapter._handle_polling_network_error(
+            OSError("Connection refused by api.telegram.org")
+        )
+
+    assert adapter._polling_network_error_count == 1
+    adapter._start_polling_once.assert_awaited_once()
