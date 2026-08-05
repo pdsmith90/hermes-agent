@@ -628,6 +628,36 @@ class TestLifecycleGuardModule:
         with pytest.raises(GatewayLifecycleBlocked):
             check_gateway_lifecycle("", str(script))
 
+    def test_oversized_interpreter_binary_is_not_blocked(self, tmp_path):
+        """`<venv>/bin/python script.py` yields the interpreter itself as a
+        referenced script (any executable containing "/"). A multi-MB compiled
+        binary must be skipped, not fail closed — this blocked the nightly
+        arxiv scan for four days when its venv CPython (33 MB) tripped the
+        1 MB fail-closed cap."""
+        from cron.lifecycle_guard import (
+            _MAX_REFERENCED_SCRIPT_BYTES,
+            contains_gateway_lifecycle_command_or_referenced_script,
+        )
+        fake_python = tmp_path / "python"
+        fake_python.write_bytes(
+            b"\x7fELF\x00\x00" * ((_MAX_REFERENCED_SCRIPT_BYTES // 6) + 1)
+        )
+        command = f"{fake_python} /home/user/scripts/fetch_papers.py propose"
+        assert not contains_gateway_lifecycle_command_or_referenced_script(command)
+
+    def test_oversized_text_script_still_fails_closed(self, tmp_path):
+        """The binary skip must not weaken the cap for genuine text scripts:
+        an oversized script we cannot afford to scan stays blocked."""
+        from cron.lifecycle_guard import (
+            _MAX_REFERENCED_SCRIPT_BYTES,
+            contains_gateway_lifecycle_command_or_referenced_script,
+        )
+        big = tmp_path / "big.sh"
+        big.write_text("echo padding\n" * ((_MAX_REFERENCED_SCRIPT_BYTES // 13) + 1))
+        assert contains_gateway_lifecycle_command_or_referenced_script(
+            f"/bin/bash {big}"
+        )
+
 
     def test_relative_script_resolved_under_scripts_dir(self, tmp_path, monkeypatch):
         """A bare/relative script name resolves under HERMES_HOME/scripts (the
