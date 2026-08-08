@@ -161,10 +161,21 @@ def test_search_encodes_query_vector_once(hoisted_retriever, monkeypatch):
 
 
 def test_search_results_bit_identical_to_unhoisted(hoisted_retriever):
-    """Parity: hoisted search() must produce the exact pre-fix results.
+    """Parity: the lazy hoist must not change search() results.
 
-    Replicates the pre-fix loop (query vector encoded per candidate) as the
-    reference and compares full scored output for exact equality.
+    FORK DIVERGENCE (see the note in FactRetriever.search): upstream's version
+    of this test builds its reference with an UNBOUND ``encode_text(query)``,
+    because upstream's hoist is a pure performance change and bit-identity to
+    the pre-hoist loop is exactly what it should assert. This fork's
+    9abe585d2 deliberately changed that semantics — a fact's content component
+    is ``bind(encode_text(content), ROLE_CONTENT)``, so comparing an unbound
+    query against it is quasi-orthogonal by construction and made the HRR term
+    near-constant noise. Asserting the unbound reference here would re-assert
+    the bug that commit fixed.
+
+    So the reference below is rebuilt with the BOUND query vector. The test's
+    actual job is unchanged and still enforced: encoding the query once,
+    lazily, must give exactly what encoding it per-candidate gives.
     """
     r = hoisted_retriever
     query = "deploy target setting"
@@ -181,8 +192,10 @@ def test_search_results_bit_identical_to_unhoisted(hoisted_retriever):
         jaccard = r._jaccard_similarity(query_tokens, all_tokens)
         fts_score = fact.get("fts_rank", 0.0)
         if r.hrr_weight > 0 and fact.get("hrr_vector"):
-            fact_vec = hrr.bytes_to_phases(fact["hrr_vector"])
-            query_vec = hrr.encode_text(query, r.hrr_dim)  # per-candidate
+            fact_vec = hrr.bytes_to_phases(fact["hrr_vector"], dim=r.hrr_dim)
+            # Per-candidate, and BOUND to ROLE_CONTENT to match search().
+            role_content = hrr.encode_atom("__hrr_role_content__", r.hrr_dim)
+            query_vec = hrr.bind(hrr.encode_text(query, r.hrr_dim), role_content)
             hrr_sim = (hrr.similarity(query_vec, fact_vec) + 1.0) / 2.0
         else:
             hrr_sim = 0.5
@@ -212,14 +225,26 @@ def test_related_encodes_role_atoms_once(hoisted_retriever, monkeypatch):
 
 
 def test_probe_encodes_role_atom_once(hoisted_retriever, monkeypatch):
+    """FORK DIVERGENCE: expected count is 0, not upstream's 1.
+
+    Upstream hoists a role_content atom out of probe()'s per-fact loop, so it
+    asserts exactly one encode (the anti-regression being "back to once per
+    row"). This fork's 9abe585d2 replaced probe()'s scoring with a direct
+    bundle-membership test against probe_key, which removed the only consumer
+    of that atom — so the correct count here is now zero, and the hoist was
+    dropped rather than left dead.
+
+    Kept as == 0 rather than <= 1 on purpose: a count of 1 means someone
+    reintroduced the residual-vs-content_vec comparison this fork removed.
+    """
     calls = _counting_spy(monkeypatch, "encode_atom")
     results = hoisted_retriever.probe("entity_1")
     assert results
     role_content_calls = [a for a in calls
                           if a and a[0] == "__hrr_role_content__"]
-    assert len(role_content_calls) == 1, (
+    assert len(role_content_calls) == 0, (
         f"role_content atom encoded {len(role_content_calls)}x in one "
-        "probe() — loop-invariant hoist regressed"
+        "probe() — the bundle-membership fix should need it zero times"
     )
 
 
