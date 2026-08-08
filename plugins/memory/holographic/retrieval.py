@@ -102,16 +102,14 @@ class FactRetriever:
         # construction, which made this term near-constant noise.
         #
         # DELIBERATE DIVERGENCE from upstream 89f74d58f, which hoists this the
-        # same way but leaves the query UNBOUND and defers it to the first
-        # candidate carrying a vector. The binding is the whole point of this
-        # fix — do not take upstream's form on the next sync. The laziness is
-        # given up with it: the `hrr_weight > 0` guard already skips the encode
-        # when HRR scoring is off, leaving only the migrated-store case (FTS
-        # candidates whose hrr_vector was never backfilled) paying one encode.
+        # same way but leaves the query UNBOUND. The binding is the whole point
+        # of this fix — do not take upstream's form on the next sync.
+        #
+        # Upstream's laziness IS kept: encode on the first candidate that
+        # actually carries a vector, so migrated stores (FTS candidates whose
+        # hrr_vector was never backfilled) pay nothing. Guarded by
+        # test_search_without_vectors_never_encodes.
         query_vec = None
-        if self.hrr_weight > 0:
-            role_content = hrr.encode_atom("__hrr_role_content__", self.hrr_dim)
-            query_vec = hrr.bind(hrr.encode_text(query, self.hrr_dim), role_content)
         scored = []
 
         for fact in candidates:
@@ -127,8 +125,15 @@ class FactRetriever:
             # signals, so a constant offset cannot invert ranking, and removing
             # it would perturb the tuned fts/jaccard/hrr weights. Do not
             # "unify" this with the max(sim, 0.0) used by the others.
-            if query_vec is not None and fact.get("hrr_vector"):
+            if self.hrr_weight > 0 and fact.get("hrr_vector"):
                 fact_vec = hrr.bytes_to_phases(fact["hrr_vector"], dim=self.hrr_dim)
+                if query_vec is None:
+                    role_content = hrr.encode_atom(
+                        "__hrr_role_content__", self.hrr_dim
+                    )
+                    query_vec = hrr.bind(
+                        hrr.encode_text(query, self.hrr_dim), role_content
+                    )
                 hrr_sim = (hrr.similarity(query_vec, fact_vec) + 1.0) / 2.0  # shift to [0,1]
             else:
                 hrr_sim = 0.5  # neutral
