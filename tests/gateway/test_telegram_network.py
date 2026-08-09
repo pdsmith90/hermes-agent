@@ -489,3 +489,94 @@ class TestDiscoverFallbackIps:
         assert ips == ["149.154.167.220"]
         assert elapsed < 1.4, f"discovery gated on hung system DNS ({elapsed:.2f}s)"
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Log level: routine recovery is not an incident
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestFallbackLogLevels:
+    """A request that recovers must not emit WARNING; only a failing one may.
+
+    Telegram's edge closes idle keep-alive connections, so a pooled socket
+    going stale between getUpdates long-poll cycles is routine and
+    self-healing — the observed steady state was an isolated failure/recovery
+    pair every few hours with no network event around it. Logging each attempt
+    at WARNING turned that into ~13 WARNING lines/day, which the nightly error
+    triage read as the box's largest error source and mined into a multi-night
+    "root cause" investigation of something that was never broken.
+    """
+
+    @pytest.mark.asyncio
+    async def test_recovered_request_emits_no_warning(self, monkeypatch, caplog):
+        calls = []
+        behavior = {"api.telegram.org": "connect_error", "149.154.167.220": "ok"}
+        monkeypatch.setattr(
+            tnet.httpx, "AsyncHTTPTransport", _fake_transport_factory(calls, behavior)
+        )
+        transport = tnet.TelegramFallbackTransport(["149.154.167.220"])
+
+        with caplog.at_level("WARNING", logger=tnet.logger.name):
+            resp = await transport.handle_async_request(_telegram_request())
+
+        assert resp.status_code == 200
+        assert transport._sticky_ip == "149.154.167.220"
+        assert caplog.records == [], (
+            "a request that recovered on a fallback IP emitted "
+            f"{len(caplog.records)} WARNING(s): "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_exhausted_request_emits_exactly_one_warning(self, monkeypatch, caplog):
+        """When every path fails the request fails too — that IS worth a warning,
+        and it should be one line carrying all attempts, not one line each."""
+        calls = []
+        behavior = {
+            "api.telegram.org": "connect_error",
+            "149.154.167.220": "connect_error",
+            "149.154.167.221": "timeout",
+        }
+        monkeypatch.setattr(
+            tnet.httpx, "AsyncHTTPTransport", _fake_transport_factory(calls, behavior)
+        )
+        transport = tnet.TelegramFallbackTransport(
+            ["149.154.167.220", "149.154.167.221"]
+        )
+
+        with caplog.at_level("WARNING", logger=tnet.logger.name):
+            with pytest.raises((httpx.ConnectError, httpx.ConnectTimeout)):
+                await transport.handle_async_request(_telegram_request())
+
+        warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warnings) == 1, (
+            f"expected one summary warning, got {len(warnings)}: "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+        msg = warnings[0].getMessage()
+        assert "149.154.167.220" in msg and "149.154.167.221" in msg
+        assert "primary-DNS" in msg
+
+    @pytest.mark.asyncio
+    async def test_empty_exception_message_still_identifies_the_error(
+        self, monkeypatch, caplog
+    ):
+        """ConnectError/ConnectTimeout often carry no message, which rendered the
+        old logs as 'connection failed ()'. The class name must survive."""
+        calls = []
+        behavior = {
+            "api.telegram.org": httpx.ConnectError(""),
+            "149.154.167.220": httpx.ConnectError(""),
+        }
+        monkeypatch.setattr(
+            tnet.httpx, "AsyncHTTPTransport", _fake_transport_factory(calls, behavior)
+        )
+        transport = tnet.TelegramFallbackTransport(["149.154.167.220"])
+
+        with caplog.at_level("WARNING", logger=tnet.logger.name):
+            with pytest.raises(httpx.ConnectError):
+                await transport.handle_async_request(_telegram_request())
+
+        msg = caplog.records[0].getMessage()
+        assert "ConnectError" in msg, f"error class not identifiable in: {msg}"
+        assert "()" not in msg, f"empty-message rendering regressed: {msg}"

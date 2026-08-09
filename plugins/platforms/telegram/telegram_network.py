@@ -128,7 +128,25 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
             if ip != sticky_ip:
                 attempt_order.append(ip)
 
+        # Per-attempt outcomes below are logged at DEBUG, not WARNING.
+        #
+        # One attempt failing and the next succeeding is this transport doing
+        # exactly its job. Telegram's edge closes idle keep-alive connections,
+        # so a pooled socket going stale between getUpdates long-poll cycles is
+        # routine and self-healing: the observed steady state is an isolated
+        # failure/recovery PAIR every few hours, with no network event of any
+        # kind around it (no route change, no resolver failure — the exception
+        # is a bare ConnectError whose str() is empty, i.e. socket-level, not
+        # DNS). Emitting a WARNING per attempt turned that ordinary recycling
+        # into ~13 WARNING lines/day, which the nightly error triage read as
+        # the single largest error source on the box and mined across several
+        # nights into a "root cause identified / FIX priority" investigation of
+        # something that was never broken.
+        #
+        # Escalation therefore happens ONCE, after the loop, and only when
+        # every path has failed and the request is genuinely about to fail.
         last_error: Exception | None = None
+        failures: list[str] = []
         for ip in attempt_order:
             candidate = request if ip is None else _rewrite_request_for_ip(request, ip)
             transport = self._primary if ip is None else await self._get_fallback(ip)
@@ -138,7 +156,7 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
                     async with self._sticky_lock:
                         if self._sticky_ip != ip:
                             self._sticky_ip = ip
-                            logger.warning(
+                            logger.debug(
                                 "[Telegram] Primary api.telegram.org path unreachable; using sticky fallback IP %s",
                                 ip,
                             )
@@ -147,28 +165,40 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
                 last_error = exc
                 if not _is_retryable_connect_error(exc):
                     raise
+                # ConnectError/ConnectTimeout frequently carry no message at
+                # all, which rendered the old logs as "connection failed ()".
+                # Fall back to the class name so the record stays identifiable.
+                detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+                failures.append(f"{ip or 'primary-DNS'} ({detail})")
                 if ip is not None and ip == self._sticky_ip:
                     async with self._sticky_lock:
                         if self._sticky_ip == ip:
                             self._sticky_ip = None
-                            logger.warning(
+                            logger.debug(
                                 "[Telegram] Sticky fallback IP %s failed; resetting to primary DNS path",
                                 ip,
                             )
                 if ip is None:
                     await self._reset_primary(transport)
-                    logger.warning(
+                    logger.debug(
                         "[Telegram] Primary api.telegram.org connection failed (%s); trying fallback IPs %s",
-                        exc,
+                        detail,
                         ", ".join(self._fallback_ips),
                     )
                     continue
-                logger.warning("[Telegram] Fallback IP %s failed: %s", ip, exc)
+                logger.debug("[Telegram] Fallback IP %s failed: %s", ip, detail)
                 await self._reset_fallback(ip)
                 continue
 
         if last_error is None:
             raise RuntimeError("All Telegram fallback IPs exhausted but no error was recorded")
+        # Every path failed, so the caller's request fails too. THIS is the
+        # event worth waking someone for, and it carries the whole picture in
+        # one line rather than one line per attempt.
+        logger.warning(
+            "[Telegram] All api.telegram.org paths failed for this request: %s",
+            "; ".join(failures) or "no attempts recorded",
+        )
         raise last_error
 
     async def aclose(self) -> None:
