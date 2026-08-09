@@ -1,37 +1,36 @@
 
 
 class TestCronMemoryProviderToolsSurvive:
-    """External provider tools must survive cron's built-in-memory disable.
+    """Cron must not disable the "memory" toolset — it also gates fact_store.
 
-    REGRESSION 2026-08-09. ``_resolve_cron_disabled_toolsets`` disables the
-    "memory" toolset in cron so the model is not offered an unbacked
-    ``memory()`` under skip_memory (upstream 03dc4aad5). But "memory" was also
-    the kill switch in ``memory_provider_tools_enabled``, so that one entry
-    stripped fact_store/fact_feedback — the ONLY memory tools a cron job has.
-    Every fact-writer then ran to completion writing nothing, and one fabricated
-    the fact_ids in its report rather than reporting the failure.
+    REGRESSION 2026-08-09. Upstream 03dc4aad5 added "memory" to
+    _resolve_cron_disabled_toolsets to hide the unbacked built-in memory() from
+    cron. But memory_provider_tools_enabled treats that same name as an
+    explicit disable of the EXTERNAL provider tools, and fact_store /
+    fact_feedback are the only memory tools a cron job has. Every fact-writer
+    then ran to completion writing nothing, one improvised raw SQL that
+    corrupted the fact_id sequence, and one fabricated the fact_ids in its
+    report.
+
+    The gate is NOT the place to fix this: "an explicit memory disable wins" is
+    a user-facing contract pinned by tests/agent/test_memory_provider.py.
     """
 
-    def test_cron_disable_of_builtin_memory_keeps_provider_tools(self):
-        from agent.memory_manager import memory_provider_tools_enabled
-        cron_disabled = ["cronjob", "messaging", "clarify", "memory"]
-        assert memory_provider_tools_enabled(None, cron_disabled) is True, (
-            "hiding the built-in memory tool must not strip fact_store"
+    def test_cron_denylist_does_not_contain_memory(self):
+        from cron.scheduler import _resolve_cron_disabled_toolsets
+        assert "memory" not in _resolve_cron_disabled_toolsets({}), (
+            "adding 'memory' here silently removes fact_store from every cron agent"
         )
-
-    def test_explicit_provider_optout_still_disables(self):
-        from agent.memory_manager import (
-            memory_provider_tools_enabled,
-            MEMORY_PROVIDER_TOOLSET,
-        )
-        assert memory_provider_tools_enabled(
-            None, ["memory", MEMORY_PROVIDER_TOOLSET]
-        ) is False
 
     def test_real_cron_toolsets_expose_provider_tools(self):
-        """Guard the actual resolver, not just a hand-written list."""
+        """Guard the actual resolver, not a hand-written list."""
         from cron.scheduler import _resolve_cron_disabled_toolsets
         from agent.memory_manager import memory_provider_tools_enabled
-        disabled = _resolve_cron_disabled_toolsets({})
-        assert "memory" in disabled, "upstream intent (hide built-in) changed"
-        assert memory_provider_tools_enabled(None, disabled) is True
+        assert memory_provider_tools_enabled(
+            None, _resolve_cron_disabled_toolsets({})
+        ) is True
+
+    def test_explicit_user_disable_still_wins(self):
+        """The upstream contract must remain intact: disabling memory disables providers."""
+        from agent.memory_manager import memory_provider_tools_enabled
+        assert memory_provider_tools_enabled(None, ["memory"]) is False

@@ -332,11 +332,29 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
     ordinary agent runs (#25752 — LLM-supplied enabled_toolsets was widening
     past config.yaml's denylist).
     """
+    # NOTE: "memory" is deliberately NOT here, reverting upstream 03dc4aad5
+    # ("hide memory tool from cron agents") on this fork.
+    #
+    # That commit's goal was sound — don't offer an unbacked memory() under
+    # skip_memory=True. But "memory" is not only the built-in tool's toolset:
+    # memory_provider_tools_enabled treats it as an explicit disable of the
+    # EXTERNAL provider tools too, and fact_store/fact_feedback are the only
+    # memory tools a cron job has. Adding it here removed fact writing from
+    # every cron agent on 2026-08-09 — jobs ran to completion storing nothing,
+    # one improvised raw SQL that corrupted the fact_id sequence, and one
+    # fabricated the fact_ids in its report.
+    #
+    # Fixing this in the gate instead was tried and reverted: an explicit
+    # memory disable winning over everything is a user-facing contract pinned
+    # by tests/agent/test_memory_provider.py. The unbacked built-in memory tool
+    # is the lesser problem and is already handled — the cron prompts tell the
+    # model "memory() does not work in cron ... move on at once", which is the
+    # pre-03dc4aad5 behaviour this restores.
     cron_cfg = (cfg or {}).get("cron") or {}
     if cron_cfg.get("allow_agent_scheduling"):
-        disabled = ["messaging", "clarify", "memory"]
+        disabled = ["messaging", "clarify"]
     else:
-        disabled = ["cronjob", "messaging", "clarify", "memory"]
+        disabled = ["cronjob", "messaging", "clarify"]
 
     # code_execution: only when it cannot possibly succeed. Under
     # approvals.cron_mode=deny (the default) tools/approval.py refuses
@@ -359,7 +377,6 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
         logger.debug("cron: could not resolve approval mode; leaving "
                      "code_execution exposed", exc_info=True)
 
->>>>>>> d5ca5cb558 (fix(cron): stop offering execute_code when cron approvals deny it)
     agent_cfg = (cfg or {}).get("agent") or {}
     from agent.skill_utils import parse_config_string_list
 

@@ -607,13 +607,24 @@ class TestRunJobSessionPersistence:
             yield fake_db, mock_agent_cls
 
 
-    def test_run_job_memory_toolset_disabled_in_cron(self, tmp_path):
-        """memory toolset must be disabled in cron sessions — issue #38129.
+    def test_run_job_memory_toolset_NOT_disabled_in_cron(self, tmp_path):
+        """FORK DIVERGENCE from upstream #38129 / 03dc4aad5.
 
-        Cron agents are constructed with skip_memory=True, so the memory
-        backend is not initialised.  Exposing the memory tool only gives the
-        model an unbacked tool that fails at runtime with
-        "Memory is not available."  Hiding it from the schema prevents that.
+        Upstream disables the "memory" toolset in cron so the model is not
+        offered an unbacked memory() under skip_memory=True. This fork does
+        NOT, because that name is overloaded: memory_provider_tools_enabled
+        reads it as an explicit disable of the EXTERNAL provider tools, and
+        fact_store/fact_feedback are the only memory tools a cron job has.
+
+        With it set, every fact-writer on 2026-08-09 ran to completion and
+        stored nothing — one shell-invoked fact_store, one hand-rolled raw SQL
+        that corrupted the fact_id sequence, and one fabricated the fact_ids in
+        its report. Losing fact writing is strictly worse than exposing a tool
+        that fails politely, and the cron prompts already instruct the model to
+        move on when memory() reports it is unavailable.
+
+        Fixing the gate instead was tried and reverted: "an explicit memory
+        disable wins" is pinned by tests/agent/test_memory_provider.py.
         """
         job = {
             "id": "memory-hide-job",
@@ -624,17 +635,19 @@ class TestRunJobSessionPersistence:
             run_job(job)
 
         kwargs = mock_agent_cls.call_args.kwargs
-        assert "memory" in (kwargs["disabled_toolsets"] or []), (
-            "memory toolset should be disabled in cron to match skip_memory=True"
+        assert "memory" not in (kwargs["disabled_toolsets"] or []), (
+            "disabling the memory toolset in cron also strips fact_store/"
+            "fact_feedback — the only memory tools a cron job has"
         )
 
-    def test_run_job_disables_memory_even_when_per_job_enables_it(self, tmp_path):
-        """Cron runs pass skip_memory=True, so memory must not be exposed.
+    def test_run_job_keeps_memory_toolset_when_per_job_enables_it(self, tmp_path):
+        """FORK DIVERGENCE — companion to the test above.
 
-        A cron job can request the memory tool through enabled_toolsets, but
-        there is no MemoryStore injected for cron agents.  Keep memory in the
-        disabled set so AIAgent filters the unbacked tool out before the model
-        can call it and receive "Memory is not available" failures.
+        skip_memory=True still holds, so the BUILT-IN memory() remains unbacked
+        and will answer "Memory is not available"; the cron prompts tell the
+        model to move on when it sees that. What must not happen is putting
+        "memory" in disabled_toolsets to achieve it, because that same name
+        gates the external provider tools and takes fact_store with it.
         """
         job = {
             "id": "memory-toolset-job",
@@ -648,7 +661,9 @@ class TestRunJobSessionPersistence:
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["skip_memory"] is True
         assert kwargs["enabled_toolsets"] == ["memory", "file"]
-        assert "memory" in kwargs["disabled_toolsets"]
+        assert "memory" not in (kwargs["disabled_toolsets"] or []), (
+            "would strip fact_store/fact_feedback from the cron agent"
+        )
 
     def test_tick_skips_due_jobs_while_dispatch_is_paused(self, tmp_path):
         """The drain gate runs before advancing a due job's schedule."""
