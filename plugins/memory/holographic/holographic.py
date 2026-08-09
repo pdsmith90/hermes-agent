@@ -24,11 +24,62 @@ import logging
 import struct
 import math
 
+_NUMPY_IMPORT_ERROR: str = ""
+
 try:
     import numpy as np
     _HAS_NUMPY = True
-except ImportError:
+except Exception as _e:  # noqa: BLE001 - see below
+    # Deliberately broader than ImportError. numpy's failure modes in a
+    # long-lived process are not all ImportError (a native symbol clash with an
+    # already-loaded BLAS/OpenMP raises other types), and a bare `except
+    # ImportError` would let those propagate and kill the whole plugin import
+    # instead of degrading. Keep the reason — without it the only symptom is a
+    # NULL column, which cost hours on 2026-08-09.
     _HAS_NUMPY = False
+    _NUMPY_IMPORT_ERROR = f"{type(_e).__name__}: {_e}"
+
+
+def refresh_numpy_availability() -> bool:
+    """Re-attempt the numpy import and update ``_HAS_NUMPY``.
+
+    ``_HAS_NUMPY`` is decided ONCE, when this module is first imported. In a
+    long-lived process that is a trap: if numpy is not importable at that exact
+    moment, every HRR operation is silently skipped for the entire life of the
+    process, and re-installing numpy on disk changes nothing until a restart.
+
+    That is not hypothetical. On 2026-08-09 the gateway imported this module
+    during plugin load with numpy unavailable, so ``_HAS_NUMPY`` stuck at False
+    while ``venv/bin/python -c "import numpy"`` succeeded from a shell — numpy
+    had 0 mappings in the gateway process. Every cron fact was written with a
+    NULL vector (invisible to probe/related/reason and to search's HRR term)
+    and only became searchable when a 5-minute repair timer rebuilt it.
+
+    Called from the write path when the flag is False, so a process that lost
+    the race at import time recovers on its own instead of silently degrading
+    until someone restarts it. Cheap: on success ``import numpy`` is a dict hit
+    in ``sys.modules``; on failure it is one failed lookup per fact write.
+    """
+    global np, _HAS_NUMPY, _NUMPY_IMPORT_ERROR
+    if _HAS_NUMPY:
+        return True
+    try:
+        import numpy as _np  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - same reasoning as the import above
+        # Record the interpreter's view too. "No module named 'numpy'" from a
+        # process whose own venv demonstrably has numpy means sys.path is not
+        # what you assume, and that is the only thing worth knowing next.
+        import sys as _sys
+        _NUMPY_IMPORT_ERROR = (
+            f"{type(exc).__name__}: {exc} "
+            f"| prefix={_sys.prefix} | exec_prefix={_sys.exec_prefix} "
+            f"| sys.path={_sys.path[:6]}"
+        )
+        return False
+    np = _np
+    _HAS_NUMPY = True
+    _NUMPY_IMPORT_ERROR = ""
+    return True
 
 logger = logging.getLogger(__name__)
 

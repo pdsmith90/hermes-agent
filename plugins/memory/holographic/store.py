@@ -3,6 +3,7 @@ SQLite-backed fact store with entity resolution and trust scoring.
 Single-user Hermes memory store plugin.
 """
 
+import logging
 import re
 import sqlite3
 import threading
@@ -12,6 +13,8 @@ try:
     from . import holographic as hrr
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS facts (
@@ -617,7 +620,30 @@ class MemoryStore:
     def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
         """Compute and store HRR vector for a fact. No-op if numpy unavailable."""
         with self._lock:
+            # The flag was captured when THIS process first imported the
+            # holographic module. Re-check before giving up: a process that
+            # started while numpy was briefly unavailable would otherwise write
+            # NULL vectors forever (see refresh_numpy_availability).
+            if not self._hrr_available and hrr.refresh_numpy_availability():
+                self._hrr_available = True
             if not self._hrr_available:
+                # Do not skip quietly. A fact with no vector is invisible to
+                # every semantic path (probe/related/reason and the HRR term in
+                # search) while still looking perfectly healthy in the table —
+                # the 2026-08-09 investigation burned hours because the only
+                # symptom was a NULL column and a 5-minute repair timer quietly
+                # papering over it. If this fires, numpy failed to import in
+                # THIS process (the flag is captured once at module import), so
+                # reinstalling numpy will not help a process that is already
+                # running; it has to be restarted.
+                logger.warning(
+                    "HRR vector NOT computed for fact %s — numpy unavailable in "
+                    "this process. The fact is stored but will not be found by "
+                    "semantic retrieval until its vector is rebuilt. "
+                    "numpy import error: %s",
+                    fact_id,
+                    getattr(hrr, "_NUMPY_IMPORT_ERROR", "") or "<none recorded>",
+                )
                 return
 
             # Get entities linked to this fact
