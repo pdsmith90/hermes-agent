@@ -58,6 +58,21 @@ jobs:
   # by both route matrices, so the two routes cover the same set.
   pick-releases:
     name: Pick release tags
+    # FORK GUARD (pdsmith90/hermes-agent-pds). This workflow answers "can a user
+    # on a released version update to this commit?" — it samples the repo's
+    # RELEASE TAGS via scripts/sandbox/pick-release-tags.sh. This fork publishes
+    # no releases and has 0 tags (upstream has 54), so the picker exits non-zero
+    # and the whole workflow fails on every scheduled run, twice a day, forever.
+    # It is inapplicable here rather than broken: nobody updates *from* a
+    # release of this fork.
+    #
+    # Same mechanism upstream already uses on deploy-site / docker / skills-index
+    # so the diff stays small and obvious at the next upstream sync. Manual
+    # dispatch is deliberately still allowed — if this fork ever cuts tags, run
+    # it explicitly rather than editing the guard back out.
+    if: >-
+      github.repository == 'NousResearch/hermes-agent'
+      || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
