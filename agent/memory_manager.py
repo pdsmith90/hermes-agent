@@ -80,14 +80,40 @@ def normalize_tool_schema(schema: Any) -> Optional[Dict[str, Any]]:
     return schema
 
 
+# Explicit opt-out name for EXTERNAL memory-provider tools (fact_store /
+# fact_feedback). Deliberately distinct from the built-in memory tool's
+# "memory" toolset — see memory_provider_tools_enabled for why conflating
+# them silently disabled fact writing in every cron job.
+MEMORY_PROVIDER_TOOLSET = "memory_provider"
+
+
 def memory_provider_tools_enabled(
     enabled_toolsets: Optional[List[str]],
     disabled_toolsets: Optional[List[str]] = None,
     *,
     memory_tool_present: bool = False,
 ) -> bool:
-    """Return whether external memory-provider tools should be exposed."""
-    if disabled_toolsets and "memory" in disabled_toolsets:
+    """Return whether external memory-provider tools should be exposed.
+
+    NOTE on the disable name. ``"memory"`` names the toolset of the BUILT-IN
+    ``memory()`` tool (the MEMORY.md store) — not these provider tools. Reading
+    it as a provider disable conflates two different things, and that conflation
+    silently removed ``fact_store``/``fact_feedback`` from every cron agent:
+
+      * upstream 03dc4aad5 ("hide memory tool from cron agents") added "memory"
+        to ``_resolve_cron_disabled_toolsets``, so cron would not offer an
+        unbacked ``memory()`` under ``skip_memory=True`` — a reasonable change
+        on its own, and one this fork keeps;
+      * but the provider tools are the ONLY memory tools a cron job has. With
+        them gone the 2026-08-09 fact-writers ran to completion and wrote
+        nothing: one shell-invoked ``fact_store``, one hand-rolled raw SQL that
+        corrupted the fact_id sequence, and one fabricated the fact_ids in its
+        report. A probe job confirmed FACT_STORE=ABSENT from the tool list.
+
+    So the built-in tool stays hidden in cron while providers survive. Turning
+    provider tools OFF is done with the explicit ``"memory_provider"`` name.
+    """
+    if disabled_toolsets and MEMORY_PROVIDER_TOOLSET in disabled_toolsets:
         return False
     if memory_tool_present:
         return True
