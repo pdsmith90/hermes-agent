@@ -3975,9 +3975,9 @@ def _preflight_check_provider_key(job: dict, cfg: dict) -> Optional[str]:
 def _preflight_check_delivery(job: dict) -> Optional[str]:
     """Check the job's delivery target(s) resolve to configured platforms.
 
-    ``local``/``origin`` (and the ``all`` routing token) need no gateway
-    credentials and are never checked — a deliver=local job must not pay a
-    gateway-config load. For concrete platform targets, an unknown platform
+    ``local``/``none``/``origin`` (and the ``all`` routing token) need no
+    gateway credentials and are never checked — a deliver=local job must not
+    pay a gateway-config load. For concrete platform targets, an unknown platform
     always blocks; a known platform additionally blocks when the gateway
     config is loadable and reports it unconnected (enabled + credentials —
     the same source `cron_delivery_targets` uses). Gateway-config load
@@ -3988,7 +3988,14 @@ def _preflight_check_delivery(job: dict) -> Optional[str]:
     platform_parts: list[str] = []
     for part in deliver_value.split(","):
         part = part.strip()
-        if not part or part.lower() in {"local", "origin", "all"}:
+        # "none" is an explicit no-delivery choice, not a platform name. It
+        # belongs in this skip-set for the same reason "local" does: there is
+        # nothing to deliver to, so there are no credentials to check. Omitting
+        # it makes preflight reject the job outright as an unknown platform —
+        # which is what happened on 2026-08-09, when this preflight (added
+        # upstream) began running ahead of the deliver-resolution paths that
+        # already understood "none", and blocked all four deliver=none jobs.
+        if not part or part.lower() in {"local", "none", "origin", "all"}:
             continue
         platform_parts.append(part.split(":", 1)[0].strip())
     if not platform_parts:

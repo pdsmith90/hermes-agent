@@ -329,6 +329,28 @@ class TestDeliveryPlatform:
         assert error is not None and "[blocked_config]" in error
         assert "notaplatform" in f"{error} {output}"
 
+    def test_none_delivery_is_not_blocked(self, tmp_path):
+        """deliver=none is an explicit no-delivery choice, not a platform name.
+
+        REGRESSION 2026-08-09: this preflight landed upstream with a skip-set of
+        {local, origin, all}. This fork treats "none" as a fourth no-delivery
+        token, but the fork's support for it lived only in the deliver-RESOLUTION
+        paths, which run later. Preflight therefore rejected "none" as an unknown
+        platform and blocked every deliver=none job before the agent was ever
+        constructed — four jobs, five executions, in one night.
+        """
+        job = _job(deliver="none")
+        with cron_jobs.use_cron_store(tmp_path):
+            cron_jobs.save_jobs([job])
+            with patch("gateway.config.load_gateway_config",
+                       side_effect=AssertionError("gateway config loaded")):
+                success, output, final_response, error, agent_constructed = \
+                    _run_job_patched(job, tmp_path)
+
+        assert success is True, f"deliver=none was blocked: {error}"
+        assert agent_constructed is True, "job never reached the agent"
+        assert not (error and "blocked_config" in str(error)), error
+
     def test_local_delivery_never_touches_gateway_config(self, tmp_path):
         """deliver=local jobs must not load gateway config in preflight."""
         job = _job(deliver="local")
