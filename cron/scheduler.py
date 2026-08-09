@@ -337,6 +337,29 @@ def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
         disabled = ["messaging", "clarify", "memory"]
     else:
         disabled = ["cronjob", "messaging", "clarify", "memory"]
+
+    # code_execution: only when it cannot possibly succeed. Under
+    # approvals.cron_mode=deny (the default) tools/approval.py refuses
+    # execute_code outright — no user is present to approve arbitrary Python —
+    # so offering it hands the model a tool guaranteed to fail. On 2026-08-09
+    # daily-review called it 19 times against that wall and burned its whole
+    # 80-call budget before dying, and weekly-trace-mining hit it twice. This is
+    # the same reasoning upstream applied to the built-in memory tool.
+    #
+    # Gated rather than unconditional: with cron_mode=approve the tool genuinely
+    # works and a deliberately trusted cron profile should keep it. The
+    # code_execution toolset contains ONLY execute_code, so unlike the "memory"
+    # entry above this cannot strip anything else — that conflation is exactly
+    # what silently removed fact_store from every cron agent.
+    try:
+        from tools.approval import _get_cron_approval_mode
+        if _get_cron_approval_mode() == "deny":
+            disabled.append("code_execution")
+    except Exception:
+        logger.debug("cron: could not resolve approval mode; leaving "
+                     "code_execution exposed", exc_info=True)
+
+>>>>>>> d5ca5cb558 (fix(cron): stop offering execute_code when cron approvals deny it)
     agent_cfg = (cfg or {}).get("agent") or {}
     from agent.skill_utils import parse_config_string_list
 

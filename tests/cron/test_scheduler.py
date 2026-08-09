@@ -2574,3 +2574,36 @@ class TestSetCronSessionTitle:
         assert out == "Nightly Synthesis #2"
         db.get_next_title_in_lineage.assert_called_once_with("Nightly Synthesis")
 
+
+
+class TestCronDisabledToolsets:
+    """The cron denylist must hide what cannot work — and nothing else.
+
+    Two separate 2026-08-09 incidents live here:
+      * "memory" was added to hide the built-in memory tool, but that name also
+        gated the EXTERNAL provider tools, silently removing fact_store from
+        every cron agent. Guarded by the fact_store assertion below.
+      * execute_code stayed exposed while approvals.cron_mode=deny refuses it,
+        so daily-review called it 19 times and burned its whole 80-call budget.
+    """
+
+    def test_code_execution_hidden_when_approvals_deny(self):
+        from unittest.mock import patch
+        from cron.scheduler import _resolve_cron_disabled_toolsets
+        with patch("tools.approval._get_cron_approval_mode", return_value="deny"):
+            assert "code_execution" in _resolve_cron_disabled_toolsets({})
+
+    def test_code_execution_kept_when_approvals_allow(self):
+        """A deliberately trusted cron profile must keep a tool that works."""
+        from unittest.mock import patch
+        from cron.scheduler import _resolve_cron_disabled_toolsets
+        with patch("tools.approval._get_cron_approval_mode", return_value="approve"):
+            assert "code_execution" not in _resolve_cron_disabled_toolsets({})
+
+    def test_denylist_never_strips_memory_provider_tools(self):
+        """fact_store/fact_feedback must survive whatever the denylist holds."""
+        from cron.scheduler import _resolve_cron_disabled_toolsets
+        from agent.memory_manager import memory_provider_tools_enabled
+        assert memory_provider_tools_enabled(
+            None, _resolve_cron_disabled_toolsets({})
+        ) is True
