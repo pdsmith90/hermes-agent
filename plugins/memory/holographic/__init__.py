@@ -462,7 +462,21 @@ class HolographicMemoryProvider(MemoryProvider):
                 return json.dumps({"updated": updated})
 
             elif action == "remove":
-                removed = store.remove_fact(int(args["fact_id"]))
+                fid = int(args["fact_id"])
+                existing = store.get_fact(fid)
+                removed = store.remove_fact(fid)
+                if not removed and existing is not None:
+                    # Distinguish a refusal from "no such fact" — a bare
+                    # {"removed": false} reads as already-gone and invites a
+                    # retry loop.
+                    return json.dumps({
+                        "removed": False,
+                        "reason": (
+                            f"category '{existing.get('category')}' is protected "
+                            f"and cannot be removed; supersede it with "
+                            f"action=update instead"
+                        ),
+                    })
                 return json.dumps({"removed": removed})
 
             elif action == "list":

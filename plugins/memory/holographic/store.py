@@ -84,6 +84,15 @@ _UNHELPFUL_DELTA = -0.10
 _TRUST_MIN       =  0.0
 _TRUST_MAX       =  1.0
 
+# Categories remove_fact() refuses without force=True. These are the durable
+# lanes whose loss is unrecoverable: there is no tombstone, and a fact written
+# since the last backup exists nowhere but the row being deleted. The verdict
+# lanes (researched, synthesis, hypothesis, open-question, general) stay
+# prunable — superseding them is how consolidation is supposed to work.
+PROTECTED_CATEGORIES = frozenset(
+    {"paper", "project", "lesson", "user_pref", "activity"}
+)
+
 # Entity extraction patterns
 _RE_CAPITALIZED  = re.compile(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b')
 # Bounded: an unbounded span crosses newlines and swallows whole log records.
@@ -436,13 +445,24 @@ class MemoryStore:
             ).fetchone()
             return self._row_to_dict(row) if row else None
 
-    def remove_fact(self, fact_id: int) -> bool:
-        """Delete a fact and its entity links. Returns True if the row existed."""
+    def remove_fact(self, fact_id: int, force: bool = False) -> bool:
+        """Delete a fact and its entity links. Returns True if the row existed.
+
+        Facts in :data:`PROTECTED_CATEGORIES` are refused unless *force* is set.
+        These are the durable lanes — a paper read, a lesson learned, a stated
+        user preference — for which deletion is unrecoverable in practice: the
+        store keeps no tombstone, and a fact written since the last backup
+        exists nowhere else. On 2026-08-14 an unattended consolidation run
+        deleted six of them in one turn, two of them hours old, against a prompt
+        that told it never to. Prose in a prompt is not an invariant; this is.
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT fact_id, category FROM facts WHERE fact_id = ?", (fact_id,)
             ).fetchone()
             if row is None:
+                return False
+            if not force and row["category"] in PROTECTED_CATEGORIES:
                 return False
 
             self._conn.execute(
