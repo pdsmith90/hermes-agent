@@ -130,6 +130,24 @@ def test_prefetch_recovers_prose_query(retriever_with_facts):
     assert "deployment rollback" in results[0]["content"].lower()
 
 
+def test_search_bumps_retrieval_count(retriever_with_facts):
+    """Surfacing a fact through search() must register as a retrieval.
+
+    This path serves per-turn prefetch injection and the fact_store search
+    action; before the bump, a fact could be injected into context every day
+    and still read retrieval_count=0 — the store looked 65% unread while
+    ambient recall was live.
+    """
+    results = retriever_with_facts.search("deployment rollback")
+    assert results
+    fid = results[0]["fact_id"]
+    row = retriever_with_facts.store.get_fact(fid)
+    assert row["retrieval_count"] >= 1
+
+    retriever_with_facts.search("deployment rollback")
+    assert retriever_with_facts.store.get_fact(fid)["retrieval_count"] >= 2
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -214,9 +232,11 @@ def test_search_results_bit_identical_to_unhoisted(hoisted_retriever):
     """
     r = hoisted_retriever
     query = "deploy target setting"
-    new_results = r.search(query)
 
     # --- pre-fix reference ---
+    # Built BEFORE search(): search now bumps retrieval_count on the rows it
+    # returns, so a reference fetched afterwards would differ in that
+    # (score-irrelevant) column.
     candidates = r._fts_candidates(query, None, 0.3, 10 * 3)
     query_tokens = r._tokenize(query)
     scored = []
@@ -244,6 +264,7 @@ def test_search_results_bit_identical_to_unhoisted(hoisted_retriever):
     for fact in old_results:
         fact.pop("hrr_vector", None)
 
+    new_results = r.search(query)
     assert new_results == old_results
 
 

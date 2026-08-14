@@ -7,6 +7,7 @@ Jaccard similarity reranking and trust-weighted scoring.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import urllib.error
@@ -21,6 +22,8 @@ try:
     from . import holographic as hrr
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
+
+logger = logging.getLogger(__name__)
 
 
 class FactRetriever:
@@ -176,6 +179,13 @@ class FactRetriever:
         # Strip raw HRR bytes — callers expect JSON-serializable dicts
         for fact in results:
             fact.pop("hrr_vector", None)
+        # Surfacing counts as retrieval: this path serves per-turn prefetch
+        # injection and the fact_store search action, neither of which was
+        # reflected in retrieval_count before.
+        try:
+            self.store.mark_retrieved([f["fact_id"] for f in results])
+        except Exception:
+            logger.debug("mark_retrieved failed", exc_info=True)
         return results
 
     def _rerank_scores(self, query: str, documents: list[str]) -> list[float] | None:

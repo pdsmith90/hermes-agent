@@ -554,6 +554,27 @@ class MemoryStore:
             rows = self._conn.execute(sql, params).fetchall()
             return [self._row_to_dict(r) for r in rows]
 
+    def mark_retrieved(self, fact_ids: list[int]) -> None:
+        """Increment retrieval_count for facts surfaced by any retrieval path.
+
+        search_facts() bumps its own matches inline; this is for the OTHER
+        surfacing paths (FactRetriever.search — which serves per-turn prefetch
+        injection, the fact_store search action, and the MCP bridge). Before
+        this existed, ambient prefetch recall was invisible: a fact could be
+        injected into context every day and still read retrieval_count=0,
+        which is how 296 of 455 facts came to look unread.
+        """
+        if not fact_ids:
+            return
+        with self._lock:
+            placeholders = ",".join("?" * len(fact_ids))
+            self._conn.execute(
+                f"UPDATE facts SET retrieval_count = retrieval_count + 1"
+                f" WHERE fact_id IN ({placeholders})",
+                list(fact_ids),
+            )
+            self._conn.commit()
+
     def record_feedback(self, fact_id: int, helpful: bool) -> dict:
         """Record user feedback and adjust trust asymmetrically.
 
