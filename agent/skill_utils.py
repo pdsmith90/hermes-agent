@@ -461,6 +461,15 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
         platform
         or os.getenv("HERMES_PLATFORM")
         or get_session_env("HERMES_SESSION_PLATFORM")
+        # cron/scheduler.py deliberately blanks HERMES_SESSION_PLATFORM so the
+        # job does not look like a message from its origin chat, which left
+        # platform_disabled["cron"] permanently unreachable — the 2026-08-13
+        # withholding of the self-modification skills was a silent no-op for a
+        # night. HERMES_CRON_SESSION ("1") is the marker the scheduler sets for
+        # exactly this kind of cron-scoped policy, so resolve through it rather
+        # than un-blanking the platform (which would also flip the tts,
+        # send_message and terminal-watcher consumers documented there).
+        or ("cron" if get_session_env("HERMES_CRON_SESSION") == "1" else "")
     )
     global_disabled = _normalize_string_set(skills_cfg.get("disabled"))
     if resolved_platform:

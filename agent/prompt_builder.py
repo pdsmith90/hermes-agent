@@ -2026,6 +2026,31 @@ def _build_skills_system_prompt_inner(
                 else:
                     index_lines.append(f"    - {name}")
 
+        # Never advertise an affordance this session does not have. The
+        # `hermes-agent` pointer hands out literal `hermes config set …` syntax
+        # and the skill_manage lines hand out a self-patching recipe; emitting
+        # them when the skill is withheld or the tool is absent tells the model
+        # to reach for something it cannot legitimately use, and on 2026-08-13 a
+        # cron job did exactly that. Withholding the skill via
+        # skills.platform_disabled is not enough on its own — the instruction to
+        # load it lived out here, outside the index.
+        _self_mod_lines = ""
+        if "hermes-agent" not in disabled:
+            _self_mod_lines += (
+                "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
+                "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
+                "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
+                "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
+                "`hermes setup`) so you don't have to guess or invent workarounds.\n"
+            )
+        if "skill_manage" in (available_tools or set()):
+            _self_mod_lines += (
+                "If a skill has issues, fix it with skill_manage(action='patch').\n"
+                "After difficult/iterative tasks, offer to save as a skill. "
+                "If a skill you loaded was missing steps, had wrong commands, or needed "
+                "pitfalls you discovered, update it before finishing.\n"
+            )
+
         result = (
             "## Skills (mandatory)\n"
             "Before replying, scan the skills below. If a skill matches or is even partially relevant "
@@ -2038,15 +2063,7 @@ def _build_skills_system_prompt_inner(
             "Skills also encode the user's preferred approach, conventions, and quality standards "
             "for tasks like code review, planning, and testing — load them even for tasks you "
             "already know how to do, because the skill defines how it should be done here.\n"
-            "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
-            "After difficult/iterative tasks, offer to save as a skill. "
-            "If a skill you loaded was missing steps, had wrong commands, or needed "
-            "pitfalls you discovered, update it before finishing.\n"
+            + _self_mod_lines +
             "\n"
             "<available_skills>\n"
             + "\n".join(index_lines) + "\n"
