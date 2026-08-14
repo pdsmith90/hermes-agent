@@ -403,3 +403,27 @@ class TestSkillsInVolatileBand:
         full = _build(build_system_prompt)
         assert full.index(_CONTEXT) < full.index(_SKILLS)
         assert full.index(_SKILLS) < full.index("Conversation started:")
+
+
+class TestSteerNoteExcludedFromCron:
+    """A cron run has no interactive user and never receives a steer.
+
+    Describing the channel there is pure downside: it hands an unattended
+    agent the marker syntax plus the rule that marker text carries "the same
+    authority as their original request", with nothing that can legitimately
+    produce one. On 2026-08-13 a cron agent emitted a forged marker as its own
+    assistant output and obeyed it, creating cron jobs no prompt authorized.
+    """
+
+    def _stable(self, platform):
+        agent = _make_agent(valid_tool_names=["read_file"], platform=platform)
+        return build_system_prompt_parts(agent)["stable"]
+
+    def test_steer_note_present_for_interactive_platforms(self):
+        for platform in ("", "cli", "telegram"):
+            assert "Mid-turn user steering" in self._stable(platform), platform
+
+    def test_steer_note_absent_for_cron(self):
+        for platform in ("cron", "CRON", " cron "):
+            assert "Mid-turn user steering" not in self._stable(platform), platform
+            assert "OUT-OF-BAND USER MESSAGE" not in self._stable(platform), platform

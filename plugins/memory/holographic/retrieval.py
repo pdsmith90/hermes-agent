@@ -712,12 +712,22 @@ class FactRetriever:
             return ""
         # Strip FTS5 operator characters from EACH token to avoid
         # accidentally creating a malformed query.
-        _FTS_SPECIAL = '"()*^:-+'
+        #
+        # '-' is TRANSLATED TO A SPACE, not deleted. The unicode61 tokenizer
+        # splits on it, so a deleted hyphen welds two indexed tokens into one
+        # that cannot exist in the index: "llama-swap" -> "llamaswap" -> zero
+        # rows, silently (tokens are OR-joined, so the query drops its highest
+        # -IDF term instead of erroring). 93% of this store's facts contain a
+        # hyphenated identifier, so the effect was corpus-wide: "guo-grace" 0
+        # hits against 83 linked facts, "grace-fo" 0 against 33. Mapping to a
+        # space keeps the surrounding phrase quotes, so the token pair is
+        # matched as an adjacent phrase: '"guo grace"' -> 88 facts.
+        _FTS_SPECIAL = '"()*^:+'
         tokens: list[str] = []
         for raw in query.lower().split():
             cleaned = raw.strip(".,;:!?\"'()[]{}#@<>") .translate(
-                str.maketrans("", "", _FTS_SPECIAL)
-            )
+                str.maketrans("-", " ", _FTS_SPECIAL)
+            ).strip()
             if len(cleaned) < 2:
                 continue
             if cleaned in cls._FTS_STOPWORDS:

@@ -30,8 +30,9 @@ from plugins.memory.holographic.store import MemoryStore
         ("the and of", None),  # None = sentinel for fallback-to-raw
         # empty string → empty output
         ("", ""),
-        # FTS5 operator characters stripped
-        ("context: length-probe", {"context", "lengthprobe"}),
+        # FTS5 operator characters stripped; hyphen becomes a phrase boundary
+        # (NOT deleted — see test_sanitize_splits_hyphenated_identifiers)
+        ("context: length-probe", {"context", "length probe"}),
         # trailing punctuation stripped by tokenizer
         ("hello, world!", {"hello", "world"}),
     ],
@@ -53,6 +54,40 @@ def test_sanitize_fts_query_extracts_content_tokens(query, expected_tokens):
     import re
     matches = re.findall(r'"([^"]+)"', result)
     assert set(matches) == expected_tokens, f"got {result!r}"
+
+
+@pytest.mark.parametrize(
+    "query,expected",
+    [
+        ("GRACE-FO", '"grace fo"'),
+        ("llama-swap", '"llama swap"'),
+        ("doc-paper-ingest", '"doc paper ingest"'),
+    ],
+)
+def test_sanitize_splits_hyphenated_identifiers(query, expected):
+    """A hyphen must become a phrase boundary, never be deleted.
+
+    unicode61 splits on '-', so deleting it welds two indexed tokens into one
+    that cannot exist in the index ("llama-swap" -> "llamaswap" -> zero rows).
+    Because tokens are OR-joined the query does not error; it silently drops
+    its most selective term. Hyphenated identifiers are the dominant naming
+    style in this corpus, so that made most of it unreachable.
+    """
+    assert FactRetriever._sanitize_fts_query(query) == expected
+
+
+def test_sanitize_hyphenated_query_matches_indexed_content(tmp_path):
+    """End-to-end: the sanitized phrase actually matches a stored fact."""
+    store = MemoryStore(str(tmp_path / "hyphen_store.db"))
+    try:
+        fid = store.add_fact(
+            "llama-swap serves GRACE-FO models on port 18000",
+            category="tool",
+        )
+        rows = store.search_facts(query="llama-swap", limit=5)
+        assert any(r["fact_id"] == fid for r in rows), rows
+    finally:
+        store.close()
 
 
 # ---------------------------------------------------------------------------

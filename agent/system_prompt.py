@@ -435,7 +435,16 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
 
     # Steering only lands inside tool results, so it's only reachable when the
     # agent has tools. Static text → byte-stable prompt (no cache hit).
-    if agent.valid_tool_names:
+    #
+    # Cron is excluded: a scheduled run has no interactive user and no steer is
+    # ever delivered to it (the scheduler never calls apply_pending_steer_*).
+    # Describing the channel there is pure downside — it hands an unattended
+    # agent both the marker syntax and the rule that marker text carries "the
+    # same authority as their original request", with nothing that can ever
+    # legitimately produce one. On 2026-08-13 a cron agent emitted a forged
+    # marker as its OWN assistant output and obeyed it, creating two cron jobs
+    # via `hermes cron create` that no job prompt authorized.
+    if agent.valid_tool_names and (agent.platform or "").lower().strip() != "cron":
         stable_parts.append(STEER_CHANNEL_NOTE)
 
     # Computer-use — goes in as its own block rather than being merged into
