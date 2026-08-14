@@ -141,8 +141,50 @@ _RE_IDENTIFIER = re.compile(
     r'|[A-Z][A-Za-z]*[0-9]+[A-Za-z0-9]*'                          # SGP4, ERA5
     r'|[A-Z][a-z]+[A-Z][A-Za-z0-9]*'                              # LightRAG
     r'|[a-z]+[A-Z][A-Za-z0-9]*'                                   # arXiv
+    r'|[a-z][a-z0-9]*(?:_[a-z0-9]+)+'                             # fact_store
     r')(?::([\w.\-]*[\w\-]))?'                                    # arXiv:2607.19083
 )
+# The lowercase-underscore branch has no uppercase requirement on purpose:
+# snake_case in prose is essentially always an identifier. Lowercase HYPHEN
+# compounds stay excluded — "real-time"/"climate-driven" are ordinary prose,
+# and lexically inseparable from "llama-swap"; those names reach the graph
+# through the tags path instead (a tag is deliberate metadata, not prose).
+
+# Single capitalized words — the shape every rule above is structurally blind
+# to, which left "Hermes" unreachable by the entity probe in 111 of the 113
+# facts naming it. A sentence-initial capital is just orthography, so a word
+# qualifies only where at least one occurrence is MID-sentence, and never from
+# inside a span the multi-word rule already claimed ("Claude" inside
+# "Claude Code" is not separately promoted from that occurrence).
+_RE_CAP_SINGLE = re.compile(r'\b([A-Z][a-z]{2,})\b')
+
+# Capitalized mid-sentence for reasons other than being a name: date prose,
+# Python literals quoted in lessons, and generic title-case words. The last
+# row is empirical — the only non-names in the top 40 by fact-degree when the
+# rule was dry-run against the live 455-fact corpus (2026-08-14); everything
+# above them was a genuine name. Extend from measurement, not speculation.
+_SINGLE_NAME_STOP = frozenset("""
+january february march april june july august september october november december
+jan feb mar apr jun jul aug sep sept oct nov dec
+monday tuesday wednesday thursday friday saturday sunday
+mon tue wed thu fri sat sun
+true false none
+documents level methods applications multi
+""".split())
+
+# Characters that end a sentence or open a structural context (bullet, quote,
+# bracket, table cell). A capital whose nearest preceding non-blank character
+# is one of these — or which starts the text — is sentence-initial.
+_SENTENCE_OPENERS = '.!?:;\n"\'`([{*>|-—'
+
+
+def _is_mid_sentence(text: str, start: int) -> bool:
+    i = start - 1
+    while i >= 0 and text[i] in ' \t':
+        i -= 1
+    if i < 0:
+        return False
+    return text[i] not in _SENTENCE_OPENERS
 
 # Entity validation bounds. 40 is the length above which a real corpus contained
 # no entity linked to more than one fact — and joining facts is the entire
@@ -189,6 +231,22 @@ def _is_entity_like(name: str) -> bool:
     if len(words) > 1 and words[0] in _CONTRACTION_HEADS:
         return False
     return True
+
+
+def _tag_entities(tags: str) -> list[str]:
+    """Entity candidates from a comma-separated tags field.
+
+    Tags are deliberate metadata — the one place a fact's author names its
+    subjects directly, in whatever casing the corpus uses ("hermes",
+    "llama-swap", "open-question"). None of the prose rules can see those
+    shapes, so tags get their own path into the graph.
+    """
+    out: list[str] = []
+    for tag in (tags or "").split(","):
+        t = tag.strip()
+        if t and _is_entity_like(t):
+            out.append(t)
+    return out
 
 
 class MemoryStore:
@@ -323,8 +381,10 @@ class MemoryStore:
                 ).fetchone()
                 return int(row["fact_id"])
 
-            # Entity extraction and linking
-            for name in self._extract_entities(content):
+            # Entity extraction and linking — content prose plus tags. A tag
+            # is the author naming the fact's subject directly; the prose
+            # rules cannot see lowercase names like "hermes" or "llama-swap".
+            for name in self._extract_entities(content) + _tag_entities(tags):
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
 
@@ -457,19 +517,28 @@ class MemoryStore:
             )
             self._conn.commit()
 
-            # If content changed, re-extract entities
-            if content is not None:
-                self._conn.execute(
-                    "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
-                )
-                for name in self._extract_entities(content):
+            # Re-derive entity links and the HRR vector when the text they
+            # encode changed. The content-change path drops every existing
+            # link (stale prose entities must not linger), so tag-derived
+            # links are restored from the row's CURRENT tags — a tags-only
+            # change adds links without dropping any.
+            if content is not None or tags is not None:
+                row2 = self._conn.execute(
+                    "SELECT content, tags FROM facts WHERE fact_id = ?",
+                    (fact_id,),
+                ).fetchone()
+                if content is not None:
+                    self._conn.execute(
+                        "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
+                    )
+                    for name in self._extract_entities(row2["content"]):
+                        entity_id = self._resolve_entity(name)
+                        self._link_fact_entity(fact_id, entity_id)
+                for name in _tag_entities(row2["tags"]):
                     entity_id = self._resolve_entity(name)
                     self._link_fact_entity(fact_id, entity_id)
                 self._conn.commit()
-
-            # Recompute HRR vector if content changed
-            if content is not None:
-                self._compute_hrr_vector(fact_id, content)
+                self._compute_hrr_vector(fact_id, row2["content"])
             # Rebuild bank for relevant category
             cat = category or self._conn.execute(
                 "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
@@ -628,6 +697,9 @@ class MemoryStore:
         2. Double-quoted terms             e.g. "Python"
         3. AKA patterns                    e.g. "Guido aka BDFL" -> two entities
         4. Identifier tokens               e.g. GRACE-FO, SGP4, arXiv:2607.19083
+        5. Single capitalized words with a mid-sentence occurrence, e.g.
+           "the Hermes gateway" -> Hermes (sentence-initial capitals are
+           orthography, not names)
 
         Every candidate must satisfy _is_entity_like, so prose spans, error
         strings and sentence fragments never become entities.
@@ -643,8 +715,10 @@ class MemoryStore:
                 seen.add(stripped.lower())
                 candidates.append(stripped)
 
+        multiword_spans = []
         for m in _RE_CAPITALIZED.finditer(text):
             _add(m.group(1))
+            multiword_spans.append(m.span(1))
 
         for m in _RE_DOUBLE_QUOTE.finditer(text):
             _add(m.group(1))
@@ -656,6 +730,17 @@ class MemoryStore:
         # group(0), not group(1): keeps the optional ":suffix" (arXiv:2607.19083).
         for m in _RE_IDENTIFIER.finditer(text):
             _add(m.group(0))
+
+        for m in _RE_CAP_SINGLE.finditer(text):
+            word = m.group(1)
+            lw = word.lower()
+            if lw in _EDGE_WORDS or lw in _SINGLE_NAME_STOP:
+                continue
+            s, e = m.span(1)
+            if any(ms <= s and e <= me for ms, me in multiword_spans):
+                continue
+            if _is_mid_sentence(text, s):
+                _add(word)
 
         return candidates
 
@@ -793,6 +878,58 @@ class MemoryStore:
                 (bank_name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, fact_count),
             )
             self._conn.commit()
+
+    def backfill_entity_links(self) -> dict:
+        """Additively re-run entity extraction (content + tags) over every fact.
+
+        Adds links that the current rules find and past rules missed. Never
+        removes a link or an entity — hundreds of legacy entity rows are
+        tag-derived and unregenerable, so subtractive re-extraction is
+        forbidden (2026-07-29 lesson). Facts that gained links get their HRR
+        vector recomputed and their category banks rebuilt, since the vector
+        encodes the linked entities.
+
+        Returns {"facts_scanned", "facts_changed", "links_added"}.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT fact_id, content, tags, category FROM facts"
+            ).fetchall()
+
+            links_added = 0
+            changed: list = []
+            for row in rows:
+                names = (self._extract_entities(row["content"])
+                         + _tag_entities(row["tags"]))
+                if not names:
+                    continue
+                before = self._conn.execute(
+                    "SELECT COUNT(*) FROM fact_entities WHERE fact_id = ?",
+                    (row["fact_id"],),
+                ).fetchone()[0]
+                for name in names:
+                    entity_id = self._resolve_entity(name)
+                    self._link_fact_entity(row["fact_id"], entity_id)
+                after = self._conn.execute(
+                    "SELECT COUNT(*) FROM fact_entities WHERE fact_id = ?",
+                    (row["fact_id"],),
+                ).fetchone()[0]
+                if after > before:
+                    links_added += after - before
+                    changed.append(row)
+
+            categories: set[str] = set()
+            for row in changed:
+                self._compute_hrr_vector(row["fact_id"], row["content"])
+                categories.add(row["category"])
+            for category in categories:
+                self._rebuild_bank(category)
+
+            return {
+                "facts_scanned": len(rows),
+                "facts_changed": len(changed),
+                "links_added": links_added,
+            }
 
     def rebuild_all_vectors(self, dim: int | None = None) -> int:
         """Recompute all HRR vectors + banks from text. For recovery/migration.
