@@ -361,7 +361,11 @@ class HolographicMemoryProvider(MemoryProvider):
         if action == "add" and self._store and content:
             try:
                 category = "user_pref" if target == "user" else "general"
-                self._store.add_fact(content, category=category)
+                self._store.add_fact(
+                    content,
+                    category=category,
+                    source_session=getattr(self, "_session_id", "") or "",
+                )
             except Exception as e:
                 logger.debug("Holographic memory_write mirror failed: %s", e)
 
@@ -397,6 +401,7 @@ class HolographicMemoryProvider(MemoryProvider):
                     args["content"],
                     category=args.get("category", "general"),
                     tags=args.get("tags", ""),
+                    source_session=getattr(self, "_session_id", "") or "",
                 )
                 return json.dumps({"fact_id": fact_id, "status": "added"})
 

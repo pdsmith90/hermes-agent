@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS facts (
     helpful_count   INTEGER DEFAULT 0,
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    hrr_vector      BLOB
+    hrr_vector      BLOB,
+    source_session  TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -76,6 +77,21 @@ CREATE TABLE IF NOT EXISTS memory_banks (
     fact_count INTEGER DEFAULT 0,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS fact_history (
+    history_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    fact_id        INTEGER NOT NULL,
+    op             TEXT NOT NULL,
+    content        TEXT NOT NULL,
+    category       TEXT,
+    tags           TEXT,
+    trust_score    REAL,
+    source_session TEXT,
+    fact_created_at TIMESTAMP,
+    changed_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_history_fact ON fact_history(fact_id);
 """
 
 # Trust adjustment constants
@@ -85,10 +101,13 @@ _TRUST_MIN       =  0.0
 _TRUST_MAX       =  1.0
 
 # Categories remove_fact() refuses without force=True. These are the durable
-# lanes whose loss is unrecoverable: there is no tombstone, and a fact written
-# since the last backup exists nowhere but the row being deleted. The verdict
-# lanes (researched, synthesis, hypothesis, open-question, general) stay
-# prunable — superseding them is how consolidation is supposed to work.
+# lanes — a paper read, a lesson learned, a stated user preference — that an
+# unattended consolidation run must never prune. fact_history now keeps a
+# tombstone of every delete and update, so loss is recoverable, but recovery
+# is manual archaeology; refusing the delete in the first place stays the
+# invariant. The verdict lanes (researched, synthesis, hypothesis,
+# open-question, general) stay prunable — superseding them is how
+# consolidation is supposed to work.
 PROTECTED_CATEGORIES = frozenset(
     {"paper", "project", "lesson", "user_pref", "activity"}
 )
@@ -252,10 +271,12 @@ class MemoryStore:
         from hermes_state import apply_wal_with_fallback
         apply_wal_with_fallback(self._conn, db_label="memory_store.db (holographic)")
         self._conn.executescript(_SCHEMA)
-        # Migrate: add hrr_vector column if missing (safe for existing databases)
+        # Migrate: add columns if missing (safe for existing databases)
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(facts)").fetchall()}
         if "hrr_vector" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
+        if "source_session" not in columns:
+            self._conn.execute("ALTER TABLE facts ADD COLUMN source_session TEXT DEFAULT ''")
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -267,12 +288,18 @@ class MemoryStore:
         content: str,
         category: str = "general",
         tags: str = "",
+        source_session: str = "",
     ) -> int:
         """Insert a fact and return its fact_id.
 
         Deduplicates by content (UNIQUE constraint). On duplicate, returns
         the existing fact_id without modifying the row. Extracts entities from
         the content and links them to the fact.
+
+        source_session records which session wrote the fact, joinable against
+        state.db / the trace archive — the provenance that made the 2026-08-14
+        deletion recovery possible was reconstructed by hand; this makes it a
+        column.
         """
         with self._lock:
             content = content.strip()
@@ -282,10 +309,10 @@ class MemoryStore:
             try:
                 cur = self._conn.execute(
                     """
-                    INSERT INTO facts (content, category, tags, trust_score)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO facts (content, category, tags, trust_score, source_session)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (content, category, tags, self.default_trust),
+                    (content, category, tags, self.default_trust, source_session or ""),
                 )
                 self._conn.commit()
                 fact_id: int = cur.lastrowid  # type: ignore[assignment]
@@ -365,6 +392,25 @@ class MemoryStore:
 
             return results
 
+    def _snapshot_fact(self, fact_id: int, op: str) -> None:
+        """Copy a fact's current row into fact_history before mutating it.
+
+        Every update and delete leaves the prior version behind, so no write
+        path can destroy the only copy of a fact. Recovery is a SELECT from
+        fact_history, not archaeology in state.db message rows.
+        """
+        self._conn.execute(
+            """
+            INSERT INTO fact_history
+                (fact_id, op, content, category, tags, trust_score,
+                 source_session, fact_created_at)
+            SELECT fact_id, ?, content, category, tags, trust_score,
+                   source_session, created_at
+            FROM facts WHERE fact_id = ?
+            """,
+            (op, fact_id),
+        )
+
     def update_fact(
         self,
         fact_id: int,
@@ -375,7 +421,8 @@ class MemoryStore:
     ) -> bool:
         """Partially update a fact. Trust is clamped to [0, 1].
 
-        Returns True if the row existed, False otherwise.
+        Returns True if the row existed, False otherwise. The pre-update row
+        is snapshotted into fact_history.
         """
         with self._lock:
             row = self._conn.execute(
@@ -383,6 +430,8 @@ class MemoryStore:
             ).fetchone()
             if row is None:
                 return False
+
+            self._snapshot_fact(fact_id, "update")
 
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
@@ -450,11 +499,12 @@ class MemoryStore:
 
         Facts in :data:`PROTECTED_CATEGORIES` are refused unless *force* is set.
         These are the durable lanes — a paper read, a lesson learned, a stated
-        user preference — for which deletion is unrecoverable in practice: the
-        store keeps no tombstone, and a fact written since the last backup
-        exists nowhere else. On 2026-08-14 an unattended consolidation run
-        deleted six of them in one turn, two of them hours old, against a prompt
-        that told it never to. Prose in a prompt is not an invariant; this is.
+        user preference. On 2026-08-14 an unattended consolidation run deleted
+        six of them in one turn, two of them hours old, against a prompt that
+        told it never to. Prose in a prompt is not an invariant; this is.
+
+        Every delete that proceeds (including force) first snapshots the row
+        into fact_history, so no deletion is ever the last copy.
         """
         with self._lock:
             row = self._conn.execute(
@@ -465,6 +515,7 @@ class MemoryStore:
             if not force and row["category"] in PROTECTED_CATEGORIES:
                 return False
 
+            self._snapshot_fact(fact_id, "delete")
             self._conn.execute(
                 "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
             )
