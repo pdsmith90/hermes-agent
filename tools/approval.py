@@ -646,8 +646,17 @@ def _match_user_deny_rule(command: str) -> str | None:
         return None
     for command_variant in _command_detection_variants(command):
         candidate = command_variant.lower().strip()
+        # A deny glob is written with single spaces ("*hermes cron *"), but the
+        # shell treats any whitespace run as one separator — so "hermes  cron"
+        # and "hermes\tcron" ran identically while sliding past the pattern.
+        # Test the whitespace-collapsed form too; for a single-spaced command
+        # it is the same string, so no existing match changes.
+        collapsed = " ".join(candidate.split())
         for pattern in globs:
-            if fnmatch.fnmatchcase(candidate, pattern.lower()):
+            lowered = pattern.lower()
+            if fnmatch.fnmatchcase(candidate, lowered) or fnmatch.fnmatchcase(
+                collapsed, lowered
+            ):
                 return pattern
     return None
 
