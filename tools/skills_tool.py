@@ -639,7 +639,15 @@ def _get_session_platform() -> str:
     """
     try:
         from gateway.session_context import get_session_env
-        return get_session_env("HERMES_SESSION_PLATFORM") or ""
+        # cron/scheduler.py deliberately blanks HERMES_SESSION_PLATFORM, and
+        # get_session_env honours that explicit "" without falling back to
+        # os.environ — so platform_disabled["cron"] was unreachable here and
+        # skill_view kept serving the skills the index already withheld.
+        # Resolve cron through its own marker, as skill_utils does.
+        return (
+            get_session_env("HERMES_SESSION_PLATFORM")
+            or ("cron" if get_session_env("HERMES_CRON_SESSION") == "1" else "")
+        )
     except Exception:
         return ""
 

@@ -64,6 +64,43 @@ class TestIsSkillDisabled:
         from tools.skills_tool import _is_skill_disabled
         assert _is_skill_disabled("discord-skill") is True
 
+    @patch("hermes_cli.config.load_config")
+    def test_cron_session_platform_disabled(self, mock_load):
+        """``platform_disabled["cron"]`` must bind in skill_view, not just the index.
+
+        cron/scheduler.py blanks HERMES_SESSION_PLATFORM (so a job doesn't look
+        like a message from its origin chat), and get_session_env honours that
+        explicit "" without falling back to os.environ.  The platform therefore
+        has to resolve through the HERMES_CRON_SESSION marker, exactly as
+        ``agent.skill_utils.get_disabled_skill_names`` does — otherwise a skill
+        withheld from ``<available_skills>`` stays readable via ``skill_view``.
+        """
+        import contextvars
+        mock_load.return_value = {"skills": {
+            "disabled": [],
+            "platform_disabled": {"cron": ["hermes-agent"]}
+        }}
+        from gateway.session_context import _VAR_MAP, set_session_vars
+        from tools.skills_tool import _is_skill_disabled
+
+        def _resolve_in_cron_context():
+            # Mirror cron/scheduler.py run_job: blank the session platform,
+            # then mark the job via the HERMES_CRON_SESSION ContextVar.
+            set_session_vars(platform="", chat_id="", chat_name="")
+            _VAR_MAP["HERMES_CRON_SESSION"].set("1")
+            return (
+                _is_skill_disabled("hermes-agent"),
+                _is_skill_disabled("unlisted-skill"),
+            )
+
+        # Run in a copied context so these ContextVar writes cannot leak into
+        # sibling tests — clear_session_vars is explicitly not stack-safe (it
+        # sets "" rather than restoring the "never set" sentinel, which would
+        # suppress the os.environ fallback the other tests rely on).
+        disabled, unlisted = contextvars.copy_context().run(_resolve_in_cron_context)
+        assert disabled is True
+        assert unlisted is False
+
 
 # ---------------------------------------------------------------------------
 # get_disabled_skill_names — explicit platform param & env var fallback
