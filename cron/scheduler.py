@@ -4286,6 +4286,112 @@ class _BoundedCronSessionDB:
         return _bounded
 
 
+def _fact_write_ledger(session_id: str) -> str:
+    """Render this job's ACTUAL fact-store writes, read back from the database.
+
+    A cron job's report is prose the model wrote, and on the write accounting
+    it is repeatedly false in both directions: the 2026-08-15 consolidate run
+    reported four removals that never happened (two of its four ids were
+    updates, one was refused by the protected-category guard, one was never
+    touched) while silently hard-deleting a fifth fact its report never
+    mentions. The morning briefing then copied those numbers forward. Telling
+    the job to self-verify in prose has failed on 2026-08-11, -08-12 and -08-15.
+
+    So the scheduler states it instead, after the run, from the store — a
+    block the agent cannot author because it is appended once the response is
+    already fixed. Attribution is exact rather than a before/after id diff:
+    inserts stamp ``facts.source_session`` and every mutation stamps
+    ``fact_history.changed_by_session``, so updates are visible too and a
+    concurrent job's writes are never misattributed to this one.
+
+    Returns "" on any failure — a ledger that cannot be built must never take
+    a job's report down with it. The database is opened read-only.
+    """
+    if not session_id:
+        return ""
+    try:
+        import sqlite3 as _sqlite3
+        from hermes_constants import get_hermes_home
+
+        db_path = get_hermes_home() / "memory_store.db"
+        if not db_path.exists():
+            return ""
+        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+        conn.row_factory = _sqlite3.Row
+        try:
+            created = conn.execute(
+                "SELECT fact_id, category FROM facts WHERE source_session = ?"
+                " ORDER BY fact_id",
+                (session_id,),
+            ).fetchall()
+            # A fact this session created and someone then deleted is gone from
+            # `facts`, so the live query alone would drop it from the creation
+            # count — which is how fid 900 (added 03:25, deleted 05:05 by the
+            # next job) would go unrecorded on both jobs' ledgers. The delete
+            # tombstone preserves the original creator in source_session.
+            created_gone = conn.execute(
+                "SELECT DISTINCT fact_id, category FROM fact_history"
+                " WHERE source_session = ? AND op = 'delete' ORDER BY fact_id",
+                (session_id,),
+            ).fetchall()
+            updated = conn.execute(
+                "SELECT DISTINCT fact_id FROM fact_history"
+                " WHERE changed_by_session = ? AND op = 'update' ORDER BY fact_id",
+                (session_id,),
+            ).fetchall()
+            removed = conn.execute(
+                "SELECT fact_id, category, substr(content, 1, 70) AS head"
+                " FROM fact_history WHERE changed_by_session = ? AND op = 'delete'"
+                " ORDER BY fact_id",
+                (session_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        logger.debug("fact-write ledger unavailable for %s", session_id,
+                     exc_info=True)
+        return ""
+
+    lines = [
+        "",
+        "## Fact-store ledger (system-generated)",
+        "",
+        "Read back from `memory_store.db` by the scheduler after this run, keyed",
+        f"on session `{session_id}`. The agent did not write this section and",
+        "cannot alter it. Where the response below disagrees with it about what",
+        "was created, updated or removed, **this block is the correct one**.",
+        "",
+    ]
+    if not (created or created_gone or updated or removed):
+        lines.append("- No fact-store writes recorded for this session.")
+    else:
+        if created or created_gone:
+            parts = [f"{r['fact_id']} ({r['category']})" for r in created]
+            parts += [
+                f"{r['fact_id']} ({r['category']}, since deleted)"
+                for r in created_gone
+            ]
+            lines.append(
+                f"- **Created ({len(parts)}):** " + ", ".join(parts)
+            )
+        if updated:
+            lines.append(
+                f"- **Updated ({len(updated)}):** "
+                + ", ".join(str(r["fact_id"]) for r in updated)
+            )
+        if removed:
+            lines.append(f"- **Removed ({len(removed)}):**")
+            for r in removed:
+                lines.append(
+                    f"    - {r['fact_id']} ({r['category']}) — {r['head']!r}"
+                )
+            lines.append(
+                "    Prior versions are in `fact_history`; recovery is a SELECT."
+            )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def run_job(
     job: dict,
     *,
@@ -5510,12 +5616,17 @@ def run_job(
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
         
+        # The ledger goes ABOVE the prompt, not at the end: context_from feeds
+        # a downstream job the first 8000 chars of this file, and every real
+        # report runs 14-21K, so an appended block would be truncated away
+        # from the exact consumer (the morning briefing) that was repeating
+        # the numbers it contradicts.
         output = f"""# Cron Job: {job_name}
 
 **Job ID:** {job_id}
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
-
+{_fact_write_ledger(_cron_session_id)}
 ## Prompt
 
 {prompt}
@@ -5524,7 +5635,7 @@ def run_job(
 
 {logged_response}
 """
-        
+
         logger.info("Job '%s' completed successfully", job_name)
 
         # Emit one JSONL line per fire for usage audit.
@@ -5567,12 +5678,17 @@ def run_job(
                 "error": error_msg,
             })
         
+        # _cron_session_id is unset if the exception fired before the session
+        # was named (prompt build, preflight); a failed run can still have
+        # written facts, so the ledger is emitted on this path too.
+        _failed_ledger = _fact_write_ledger(locals().get("_cron_session_id") or "")
+
         output = f"""# Cron Job: {job_name} (FAILED)
 
 **Job ID:** {job_id}
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
-
+{_failed_ledger}
 ## Prompt
 
 {prompt}
