@@ -7,6 +7,7 @@ import logging
 import re
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 try:
@@ -87,6 +88,7 @@ CREATE TABLE IF NOT EXISTS fact_history (
     tags           TEXT,
     trust_score    REAL,
     source_session TEXT,
+    changed_by_session TEXT DEFAULT '',
     fact_created_at TIMESTAMP,
     changed_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -335,6 +337,14 @@ class MemoryStore:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         if "source_session" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN source_session TEXT DEFAULT ''")
+        hist_columns = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(fact_history)").fetchall()
+        }
+        if hist_columns and "changed_by_session" not in hist_columns:
+            self._conn.execute(
+                "ALTER TABLE fact_history ADD COLUMN changed_by_session TEXT DEFAULT ''"
+            )
         self._conn.commit()
 
     # ------------------------------------------------------------------
@@ -452,24 +462,61 @@ class MemoryStore:
 
             return results
 
-    def _snapshot_fact(self, fact_id: int, op: str) -> None:
+    def _snapshot_fact(self, fact_id: int, op: str, changed_by: str = "") -> None:
         """Copy a fact's current row into fact_history before mutating it.
 
         Every update and delete leaves the prior version behind, so no write
         path can destroy the only copy of a fact. Recovery is a SELECT from
         fact_history, not archaeology in state.db message rows.
+
+        The snapshot is the BEFORE image, so ``source_session`` in it is the
+        session that CREATED the fact. ``changed_by`` is the session
+        performing this mutation — the two differ whenever one job edits
+        another's fact, which is the common case for the nightly jobs. Without
+        the distinction a tombstone cannot name the job that deleted a row.
+
+        Callers must run this inside the same transaction as the mutation (see
+        ``_write_txn``); a snapshot committed for a write that then failed is
+        a false audit record.
         """
         self._conn.execute(
             """
             INSERT INTO fact_history
                 (fact_id, op, content, category, tags, trust_score,
-                 source_session, fact_created_at)
+                 source_session, changed_by_session, fact_created_at)
             SELECT fact_id, ?, content, category, tags, trust_score,
-                   source_session, created_at
+                   source_session, ?, created_at
             FROM facts WHERE fact_id = ?
             """,
-            (op, fact_id),
+            (op, changed_by or "", fact_id),
         )
+
+    @contextmanager
+    def _write_txn(self):
+        """Commit a snapshot+mutation pair together, or roll both back.
+
+        The connection runs in autocommit (``isolation_level=None``), so each
+        statement was its own transaction: ``_snapshot_fact`` committed the
+        history row the instant it ran, and when the mutation then raised —
+        e.g. UNIQUE(content) on an update to text another fact already holds —
+        the row stayed. ``rollback()`` cannot undo it; there is no open
+        transaction to roll back. That is how fact_history came to assert an
+        update that never happened.
+
+        An explicit BEGIN is therefore required to bind the pair. It is closed
+        on every path so the write lock is never left dangling, which is what
+        autocommit was chosen to guarantee (see the connect() comment).
+        """
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            yield
+            self._conn.execute("COMMIT")
+        except Exception:
+            try:
+                self._conn.execute("ROLLBACK")
+            except Exception:
+                logger.exception("fact_history rollback failed for a failed write")
+            raise
 
     def update_fact(
         self,
@@ -478,11 +525,14 @@ class MemoryStore:
         trust_delta: float | None = None,
         tags: str | None = None,
         category: str | None = None,
+        changed_by: str = "",
     ) -> bool:
         """Partially update a fact. Trust is clamped to [0, 1].
 
         Returns True if the row existed, False otherwise. The pre-update row
-        is snapshotted into fact_history.
+        is snapshotted into fact_history, stamped with *changed_by* so the
+        mutating session is recoverable; the snapshot and the UPDATE commit
+        together or not at all.
         """
         with self._lock:
             row = self._conn.execute(
@@ -490,8 +540,6 @@ class MemoryStore:
             ).fetchone()
             if row is None:
                 return False
-
-            self._snapshot_fact(fact_id, "update")
 
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
@@ -511,11 +559,12 @@ class MemoryStore:
                 params.append(new_trust)
 
             params.append(fact_id)
-            self._conn.execute(
-                f"UPDATE facts SET {', '.join(assignments)} WHERE fact_id = ?",
-                params,
-            )
-            self._conn.commit()
+            with self._write_txn():
+                self._snapshot_fact(fact_id, "update", changed_by)
+                self._conn.execute(
+                    f"UPDATE facts SET {', '.join(assignments)} WHERE fact_id = ?",
+                    params,
+                )
 
             # Re-derive entity links and the HRR vector when the text they
             # encode changed. The content-change path drops every existing
@@ -563,7 +612,9 @@ class MemoryStore:
             ).fetchone()
             return self._row_to_dict(row) if row else None
 
-    def remove_fact(self, fact_id: int, force: bool = False) -> bool:
+    def remove_fact(
+        self, fact_id: int, force: bool = False, changed_by: str = ""
+    ) -> bool:
         """Delete a fact and its entity links. Returns True if the row existed.
 
         Facts in :data:`PROTECTED_CATEGORIES` are refused unless *force* is set.
@@ -584,12 +635,12 @@ class MemoryStore:
             if not force and row["category"] in PROTECTED_CATEGORIES:
                 return False
 
-            self._snapshot_fact(fact_id, "delete")
-            self._conn.execute(
-                "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
-            )
-            self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
-            self._conn.commit()
+            with self._write_txn():
+                self._snapshot_fact(fact_id, "delete", changed_by)
+                self._conn.execute(
+                    "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
+                )
+                self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
             self._rebuild_bank(row["category"])
             return True
 

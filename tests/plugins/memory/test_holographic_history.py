@@ -128,6 +128,74 @@ class TestSourceSession:
         rows = _history(store, fid)
         assert rows[0]["source_session"] == "sess-xyz"
 
+    def test_history_records_the_mutating_session_not_the_creator(self, store):
+        # source_session is the BEFORE image, so it names whoever CREATED the
+        # fact. Attribution of the change itself needs its own column: the
+        # nightly jobs routinely edit and delete each other's facts, and a
+        # tombstone that names the creator cannot answer "which job deleted
+        # this?" — the question the 2026-08-14 mass-delete made urgent.
+        fid = store.add_fact("owned", category="general",
+                             source_session="sess-creator")
+        store.update_fact(fid, content="edited", changed_by="sess-editor")
+        store.remove_fact(fid, force=True, changed_by="sess-deleter")
+
+        rows = _history(store, fid)
+        assert [r["op"] for r in rows] == ["update", "delete"]
+        assert [r["source_session"] for r in rows] == ["sess-creator"] * 2
+        assert [r["changed_by_session"] for r in rows] == ["sess-editor",
+                                                           "sess-deleter"]
+
+    def test_changed_by_defaults_to_empty_string(self, store):
+        fid = store.add_fact("unattributed", category="general")
+        store.update_fact(fid, content="changed")
+        assert _history(store, fid)[0]["changed_by_session"] == ""
+
+
+class TestFailedWriteLeavesNoHistory:
+    """A history row must never describe a write that did not land.
+
+    The connection runs in autocommit, so the snapshot INSERT committed the
+    instant it ran and survived the mutation's rollback — fact_history then
+    asserted an update that never happened, which is worse than no audit
+    trail at all because it reads as authoritative.
+    """
+
+    def test_unique_violation_rolls_back_the_snapshot(self, store):
+        keeper = store.add_fact("taken content", category="general")
+        other = store.add_fact("other content", category="general")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            store.update_fact(other, content="taken content",
+                              changed_by="sess-editor")
+
+        assert _history(store, other) == []
+        assert store.get_fact(other)["content"] == "other content"
+        assert store.get_fact(keeper)["content"] == "taken content"
+
+    def test_later_write_does_not_publish_the_orphaned_snapshot(self, store):
+        # The shared connection is process-wide, so the pending INSERT used to
+        # be published by whichever caller committed next.
+        a = store.add_fact("alpha", category="general")
+        b = store.add_fact("beta", category="general")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            store.update_fact(b, content="alpha")
+
+        store.update_fact(a, trust_delta=0.01)  # the next caller's commit
+        assert _history(store, b) == []
+
+    def test_connection_is_usable_after_a_rolled_back_write(self, store):
+        # The explicit BEGIN must be closed on the failure path too, or the
+        # write lock leaks and every later write blocks until timeout.
+        a = store.add_fact("first", category="general")
+        b = store.add_fact("second", category="general")
+        with pytest.raises(sqlite3.IntegrityError):
+            store.update_fact(b, content="first")
+
+        assert store.update_fact(b, content="second revised") is True
+        assert store.remove_fact(a) is True
+        assert store.get_fact(b)["content"] == "second revised"
+
     def test_migration_adds_column_to_existing_db(self, tmp_path):
         # A database created before the column existed must gain it on open.
         db = tmp_path / "old.db"

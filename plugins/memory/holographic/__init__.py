@@ -463,13 +463,16 @@ class HolographicMemoryProvider(MemoryProvider):
                     trust_delta=float(args["trust_delta"]) if "trust_delta" in args else None,
                     tags=args.get("tags"),
                     category=args.get("category"),
+                    changed_by=getattr(self, "_session_id", "") or "",
                 )
                 return json.dumps({"updated": updated})
 
             elif action == "remove":
                 fid = int(args["fact_id"])
                 existing = store.get_fact(fid)
-                removed = store.remove_fact(fid)
+                removed = store.remove_fact(
+                    fid, changed_by=getattr(self, "_session_id", "") or ""
+                )
                 if not removed and existing is not None:
                     # Distinguish a refusal from "no such fact" — a bare
                     # {"removed": false} reads as already-gone and invites a
