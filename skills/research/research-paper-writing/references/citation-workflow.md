@@ -51,7 +51,11 @@ Research has documented significant issues with AI-generated citations:
 | **Semantic Scholar** | 214M papers | 1 RPS (free key) | ML/AI papers, citation graphs |
 | **CrossRef** | 140M+ DOIs | Polite pool with mailto | DOI lookup, BibTeX retrieval |
 | **arXiv** | Preprints | 3-second delays | ML preprints, PDF access |
-| **OpenAlex** | 240M+ works | 100K/day, 10 RPS | Open alternative to MAG |
+| **OpenAlex** | 240M+ works | 100K credits/day, 10 RPS | Open alternative to MAG |
+
+OpenAlex requires an API key on every request (since 2026-02-13): append
+`&api_key=$OPENALEX_API_KEY` (the key is in the environment, loaded from
+`~/.hermes/.env`) alongside the usual `mailto=` param.
 
 ### API Selection Guide
 

@@ -96,7 +96,7 @@ The writing philosophy, citation verification workflow, and conference reference
 | **Semantic Scholar** | [Docs](https://api.semanticscholar.org/api-docs/) | ML/AI papers, citation graphs |
 | **CrossRef** | [Docs](https://www.crossref.org/documentation/retrieve-metadata/rest-api/) | DOI lookup, BibTeX retrieval |
 | **arXiv** | [Docs](https://info.arxiv.org/help/api/basics.html) | Preprints, PDF access |
-| **OpenAlex** | [Docs](https://docs.openalex.org/) | Open alternative, bulk access |
+| **OpenAlex** | [Docs](https://docs.openalex.org/) | Open alternative, bulk access — requires `api_key=$OPENALEX_API_KEY` (env, from `~/.hermes/.env`) |
 
 ### Python Libraries
 
