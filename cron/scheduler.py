@@ -4286,7 +4286,31 @@ class _BoundedCronSessionDB:
         return _bounded
 
 
-def _fact_write_ledger(session_id: str) -> str:
+def _memory_md_snapshot() -> Optional[dict]:
+    """Size + sha1 of the always-in-context MEMORY.md, or None if unreadable.
+
+    Taken by ``run_job`` right after the session id is minted, and compared
+    against a second snapshot at report time by ``_fact_write_ledger`` — the
+    file's tripwire. MEMORY.md may only change when the render-memory job
+    materializes it from the store's ``memory-entry`` facts; an agent-side
+    edit showing up in any job's ledger line is a violation. Fail-soft: any
+    error returns None, never raises into the job.
+    """
+    try:
+        import hashlib
+        from hermes_constants import get_hermes_home
+
+        path = get_hermes_home() / "memories" / "MEMORY.md"
+        if not path.exists():
+            return None
+        raw = path.read_bytes()
+        return {"size": len(raw), "sha1": hashlib.sha1(raw).hexdigest()[:12]}
+    except Exception:
+        logger.debug("MEMORY.md snapshot unavailable", exc_info=True)
+        return None
+
+
+def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None) -> str:
     """Render this job's ACTUAL fact-store writes, read back from the database.
 
     A cron job's report is prose the model wrote, and on the write accounting
@@ -4304,52 +4328,47 @@ def _fact_write_ledger(session_id: str) -> str:
     ``fact_history.changed_by_session``, so updates are visible too and a
     concurrent job's writes are never misattributed to this one.
 
-    Returns "" on any failure — a ledger that cannot be built must never take
-    a job's report down with it. The database is opened read-only.
-    """
-    if not session_id:
-        return ""
-    try:
-        import sqlite3 as _sqlite3
-        from hermes_constants import get_hermes_home
+    ``memory_md_before`` is the :func:`_memory_md_snapshot` taken at run start;
+    when given, the block also states whether MEMORY.md changed during the run
+    — the tripwire for the one file no cron agent is allowed to edit. That
+    line is computed independently of the database read-back, so a broken
+    store cannot silence it (and vice versa).
 
-        db_path = get_hermes_home() / "memory_store.db"
-        if not db_path.exists():
-            return ""
-        conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
-        conn.row_factory = _sqlite3.Row
+    Returns "" only when nothing can be stated at all — a ledger that cannot
+    be built must never take a job's report down with it. The database is
+    opened read-only.
+    """
+    db_rows = None
+    if session_id:
         try:
-            created = conn.execute(
-                "SELECT fact_id, category FROM facts WHERE source_session = ?"
-                " ORDER BY fact_id",
-                (session_id,),
-            ).fetchall()
-            # A fact this session created and someone then deleted is gone from
-            # `facts`, so the live query alone would drop it from the creation
-            # count — which is how fid 900 (added 03:25, deleted 05:05 by the
-            # next job) would go unrecorded on both jobs' ledgers. The delete
-            # tombstone preserves the original creator in source_session.
-            created_gone = conn.execute(
-                "SELECT DISTINCT fact_id, category FROM fact_history"
-                " WHERE source_session = ? AND op = 'delete' ORDER BY fact_id",
-                (session_id,),
-            ).fetchall()
-            updated = conn.execute(
-                "SELECT DISTINCT fact_id FROM fact_history"
-                " WHERE changed_by_session = ? AND op = 'update' ORDER BY fact_id",
-                (session_id,),
-            ).fetchall()
-            removed = conn.execute(
-                "SELECT fact_id, category, substr(content, 1, 70) AS head"
-                " FROM fact_history WHERE changed_by_session = ? AND op = 'delete'"
-                " ORDER BY fact_id",
-                (session_id,),
-            ).fetchall()
-        finally:
-            conn.close()
-    except Exception:
-        logger.debug("fact-write ledger unavailable for %s", session_id,
-                     exc_info=True)
+            db_rows = _fact_write_ledger_rows(session_id)
+        except Exception:
+            logger.debug("fact-write ledger unavailable for %s", session_id,
+                         exc_info=True)
+
+    mem_line = None
+    if memory_md_before is not None:
+        try:
+            after = _memory_md_snapshot()
+            if after is None:
+                mem_line = (
+                    f"- **MEMORY.md:** was {memory_md_before['size']} B at run "
+                    "start; unreadable or missing at run end."
+                )
+            elif after == memory_md_before:
+                mem_line = f"- **MEMORY.md:** unchanged ({after['size']} B)."
+            else:
+                mem_line = (
+                    f"- **MEMORY.md:** CHANGED {memory_md_before['size']} B "
+                    f"(sha1 {memory_md_before['sha1']}) -> {after['size']} B "
+                    f"(sha1 {after['sha1']}) — agent-side edits to this file "
+                    "are unauthorized; it is materialized from memory-entry "
+                    "facts by the render-memory job."
+                )
+        except Exception:
+            logger.debug("MEMORY.md ledger line unavailable", exc_info=True)
+
+    if db_rows is None and mem_line is None:
         return ""
 
     lines = [
@@ -4362,34 +4381,87 @@ def _fact_write_ledger(session_id: str) -> str:
         "was created, updated or removed, **this block is the correct one**.",
         "",
     ]
-    if not (created or created_gone or updated or removed):
-        lines.append("- No fact-store writes recorded for this session.")
+    if db_rows is None:
+        lines.append("- Fact-store read-back unavailable for this run.")
     else:
-        if created or created_gone:
-            parts = [f"{r['fact_id']} ({r['category']})" for r in created]
-            parts += [
-                f"{r['fact_id']} ({r['category']}, since deleted)"
-                for r in created_gone
-            ]
-            lines.append(
-                f"- **Created ({len(parts)}):** " + ", ".join(parts)
-            )
-        if updated:
-            lines.append(
-                f"- **Updated ({len(updated)}):** "
-                + ", ".join(str(r["fact_id"]) for r in updated)
-            )
-        if removed:
-            lines.append(f"- **Removed ({len(removed)}):**")
-            for r in removed:
+        created, created_gone, updated, removed = db_rows
+        if not (created or created_gone or updated or removed):
+            lines.append("- No fact-store writes recorded for this session.")
+        else:
+            if created or created_gone:
+                parts = [f"{r['fact_id']} ({r['category']})" for r in created]
+                parts += [
+                    f"{r['fact_id']} ({r['category']}, since deleted)"
+                    for r in created_gone
+                ]
                 lines.append(
-                    f"    - {r['fact_id']} ({r['category']}) — {r['head']!r}"
+                    f"- **Created ({len(parts)}):** " + ", ".join(parts)
                 )
-            lines.append(
-                "    Prior versions are in `fact_history`; recovery is a SELECT."
-            )
+            if updated:
+                lines.append(
+                    f"- **Updated ({len(updated)}):** "
+                    + ", ".join(str(r["fact_id"]) for r in updated)
+                )
+            if removed:
+                lines.append(f"- **Removed ({len(removed)}):**")
+                for r in removed:
+                    lines.append(
+                        f"    - {r['fact_id']} ({r['category']}) — {r['head']!r}"
+                    )
+                lines.append(
+                    "    Prior versions are in `fact_history`; recovery is a SELECT."
+                )
+    if mem_line:
+        lines.append(mem_line)
     lines.append("")
     return "\n".join(lines)
+
+
+def _fact_write_ledger_rows(session_id: str):
+    """The four read-only queries behind :func:`_fact_write_ledger`.
+
+    Raises on any problem (missing db, corrupt file, schema too old) — the
+    caller catches and degrades, keeping the failure-softness contract in one
+    place.
+    """
+    import sqlite3 as _sqlite3
+    from hermes_constants import get_hermes_home
+
+    db_path = get_hermes_home() / "memory_store.db"
+    if not db_path.exists():
+        raise FileNotFoundError(db_path)
+    conn = _sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+    conn.row_factory = _sqlite3.Row
+    try:
+        created = conn.execute(
+            "SELECT fact_id, category FROM facts WHERE source_session = ?"
+            " ORDER BY fact_id",
+            (session_id,),
+        ).fetchall()
+        # A fact this session created and someone then deleted is gone from
+        # `facts`, so the live query alone would drop it from the creation
+        # count — which is how fid 900 (added 03:25, deleted 05:05 by the
+        # next job) would go unrecorded on both jobs' ledgers. The delete
+        # tombstone preserves the original creator in source_session.
+        created_gone = conn.execute(
+            "SELECT DISTINCT fact_id, category FROM fact_history"
+            " WHERE source_session = ? AND op = 'delete' ORDER BY fact_id",
+            (session_id,),
+        ).fetchall()
+        updated = conn.execute(
+            "SELECT DISTINCT fact_id FROM fact_history"
+            " WHERE changed_by_session = ? AND op = 'update' ORDER BY fact_id",
+            (session_id,),
+        ).fetchall()
+        removed = conn.execute(
+            "SELECT fact_id, category, substr(content, 1, 70) AS head"
+            " FROM fact_history WHERE changed_by_session = ? AND op = 'delete'"
+            " ORDER BY fact_id",
+            (session_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return created, created_gone, updated, removed
 
 
 def run_job(
@@ -4736,6 +4808,10 @@ def run_job(
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return True, "", SILENT_MARKER, None
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
+    # MEMORY.md tripwire: paired with a second snapshot at report time by
+    # _fact_write_ledger. Taken here (after the pre-run script, before the
+    # agent) so everything the agent does to the file is visible.
+    _memfile_before = _memory_md_snapshot()
 
     logger.info("Running job '%s' (ID: %s)", job_name, job_id)
     logger.info("Prompt: %s", prompt[:100])
@@ -5626,7 +5702,7 @@ def run_job(
 **Job ID:** {job_id}
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
 **Schedule:** {job.get('schedule_display', 'N/A')}
-{_fact_write_ledger(_cron_session_id)}
+{_fact_write_ledger(_cron_session_id, _memfile_before)}
 ## Prompt
 
 {prompt}
@@ -5681,7 +5757,10 @@ def run_job(
         # _cron_session_id is unset if the exception fired before the session
         # was named (prompt build, preflight); a failed run can still have
         # written facts, so the ledger is emitted on this path too.
-        _failed_ledger = _fact_write_ledger(locals().get("_cron_session_id") or "")
+        _failed_ledger = _fact_write_ledger(
+            locals().get("_cron_session_id") or "",
+            locals().get("_memfile_before"),
+        )
 
         output = f"""# Cron Job: {job_name} (FAILED)
 

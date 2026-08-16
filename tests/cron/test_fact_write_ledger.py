@@ -121,6 +121,77 @@ class TestLedgerAccuracy:
         assert 0 <= report.find("Fact-store ledger") < 8000
 
 
+class TestMemoryMdTripwire:
+    """The ledger states whether MEMORY.md changed during the run.
+
+    The file may only change when the render-memory job materializes it from
+    memory-entry facts; the dream job has corrupted it through raw file edits
+    (08-10 truncation to 587 B, 08-13 oversize + destroyed backup, 08-15 stale
+    write_file rewrite) while reporting success. The snapshot pair makes any
+    agent-side edit visible in that job's own report.
+    """
+
+    @pytest.fixture
+    def memdir(self, tmp_path):
+        d = tmp_path / "memories"
+        d.mkdir()
+        (d / "MEMORY.md").write_text("entry one\n§\nentry two\n", encoding="utf-8")
+        return d
+
+    def _snap(self, tmp_path, monkeypatch):
+        import hermes_constants
+        from cron import scheduler
+
+        monkeypatch.setattr(hermes_constants, "get_hermes_home", lambda: tmp_path)
+        return scheduler._memory_md_snapshot()
+
+    def test_unchanged_file_reports_unchanged(self, ledger, store, tmp_path,
+                                              monkeypatch, memdir):
+        store.add_fact("x", category="general", source_session=SESSION)
+        before = self._snap(tmp_path, monkeypatch)
+        block = ledger(SESSION, before)
+        assert f"**MEMORY.md:** unchanged ({before['size']} B)" in block
+
+    def test_changed_file_is_called_out_with_both_hashes(self, ledger, store,
+                                                         tmp_path, monkeypatch,
+                                                         memdir):
+        store.add_fact("x", category="general", source_session=SESSION)
+        before = self._snap(tmp_path, monkeypatch)
+        (memdir / "MEMORY.md").write_text("tampered\n", encoding="utf-8")
+        block = ledger(SESSION, before)
+        assert "**MEMORY.md:** CHANGED" in block
+        assert before["sha1"] in block
+        assert "unauthorized" in block
+
+    def test_file_deleted_mid_run_is_called_out(self, ledger, store, tmp_path,
+                                                monkeypatch, memdir):
+        store.add_fact("x", category="general", source_session=SESSION)
+        before = self._snap(tmp_path, monkeypatch)
+        (memdir / "MEMORY.md").unlink()
+        block = ledger(SESSION, before)
+        assert "unreadable or missing at run end" in block
+
+    def test_tripwire_survives_a_dead_fact_store(self, ledger, tmp_path,
+                                                 monkeypatch, memdir):
+        # The MEMORY.md line must not die with the database: corrupt the store
+        # and the block still appears, stating both degradations honestly.
+        before = self._snap(tmp_path, monkeypatch)
+        (tmp_path / "memory_store.db").write_text("not a database")
+        block = ledger(SESSION, before)
+        assert "Fact-store read-back unavailable" in block
+        assert "**MEMORY.md:** unchanged" in block
+
+    def test_no_snapshot_means_no_line(self, ledger, store):
+        # Callers that never took a before-snapshot (older paths, tests) get
+        # the ledger exactly as before — no MEMORY.md line, no crash.
+        store.add_fact("x", category="general", source_session=SESSION)
+        assert "MEMORY.md" not in ledger(SESSION)
+
+    def test_missing_memories_dir_yields_none_snapshot(self, tmp_path,
+                                                       monkeypatch):
+        assert self._snap(tmp_path, monkeypatch) is None
+
+
 class TestLedgerNeverBreaksAJob:
     """A ledger that cannot be built must degrade to nothing, never raise."""
 

@@ -109,9 +109,11 @@ _TRUST_MAX       =  1.0
 # is manual archaeology; refusing the delete in the first place stays the
 # invariant. The verdict lanes (researched, synthesis, hypothesis,
 # open-question, general) stay prunable — superseding them is how
-# consolidation is supposed to work.
+# consolidation is supposed to work. "memory-entry" rows ARE the
+# always-in-context MEMORY.md (a renderer materializes the file from them);
+# retiring one is a trust decay via update, never a delete.
 PROTECTED_CATEGORIES = frozenset(
-    {"paper", "project", "lesson", "user_pref", "activity"}
+    {"paper", "project", "lesson", "user_pref", "activity", "memory-entry"}
 )
 
 # Entity extraction patterns
