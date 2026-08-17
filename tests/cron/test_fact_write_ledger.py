@@ -134,7 +134,7 @@ class TestMemoryMdTripwire:
     @pytest.fixture
     def memdir(self, tmp_path):
         d = tmp_path / "memories"
-        d.mkdir()
+        d.mkdir(exist_ok=True)
         (d / "MEMORY.md").write_text("entry one\n§\nentry two\n", encoding="utf-8")
         return d
 
