@@ -7,12 +7,27 @@ default off) makes that denial opt-out-able:
 
   - gate off / absent: byte-exact current behavior — ``cronjob`` denied.
   - gate on: ``cronjob`` dropped from the base denylist; ``messaging`` and
-    ``clarify`` (interactivity constraints) and ``memory`` (cron agents run
-    with skip_memory=True) are ALWAYS denied regardless of the gate.
+    ``clarify`` (interactivity constraints) are ALWAYS denied regardless of
+    the gate.
   - user-level ``agent.disabled_toolsets`` still layers on top, so a user who
     denies ``cronjob`` globally keeps it denied even with the gate on
     (per-job enabled_toolsets can never widen past the config denylist).
+
+Fork divergence from upstream's version of this contract:
+
+  - ``memory`` is deliberately NOT in the base denylist. On this fork the
+    entry was reverted because memory_provider_tools_enabled treats it as an
+    explicit disable of the EXTERNAL provider tools too, which silently
+    removed fact_store from every cron agent (2026-08-09). See the NOTE in
+    ``_resolve_cron_disabled_toolsets`` and TestCronDisabledToolsets in
+    test_scheduler.py.
+  - ``code_execution`` is appended whenever approvals.cron_mode resolves to
+    "deny" (the shipped default), so the exact-list assertions pin it. The
+    fixture below pins the approval mode so these tests don't float on the
+    machine's live config.
 """
+
+from unittest.mock import patch
 
 import pytest
 
@@ -20,27 +35,32 @@ from cron.scheduler import _resolve_cron_disabled_toolsets
 
 
 # The toolsets that must be denied in cron context no matter what the
-# agent-scheduling gate says: messaging/clarify are interactive-only,
-# memory is unbacked in cron runs (skip_memory=True).
-ALWAYS_DISABLED = ["messaging", "clarify", "memory"]
+# agent-scheduling gate says: messaging/clarify are interactive-only.
+# (Upstream also lists "memory" here; this fork deliberately does not —
+# see the module docstring.)
+ALWAYS_DISABLED = ["messaging", "clarify"]
+
+# The base denylist with the gate off, under cron_mode=deny (pinned below).
+GATE_OFF_BASE = ["cronjob", "messaging", "clarify", "code_execution"]
+
+
+@pytest.fixture(autouse=True)
+def _pin_cron_approval_mode_deny():
+    """Pin approvals.cron_mode=deny so exact-list assertions are stable."""
+    with patch("tools.approval._get_cron_approval_mode", return_value="deny"):
+        yield
 
 
 class TestGateOffDefault:
     def test_empty_config_denies_cronjob(self):
-        assert _resolve_cron_disabled_toolsets({}) == [
-            "cronjob", "messaging", "clarify", "memory",
-        ]
+        assert _resolve_cron_disabled_toolsets({}) == GATE_OFF_BASE
 
     def test_none_config_denies_cronjob(self):
-        assert _resolve_cron_disabled_toolsets(None) == [
-            "cronjob", "messaging", "clarify", "memory",
-        ]
+        assert _resolve_cron_disabled_toolsets(None) == GATE_OFF_BASE
 
     def test_cron_section_present_but_gate_absent(self):
         cfg = {"cron": {"preflight": True}}
-        assert _resolve_cron_disabled_toolsets(cfg) == [
-            "cronjob", "messaging", "clarify", "memory",
-        ]
+        assert _resolve_cron_disabled_toolsets(cfg) == GATE_OFF_BASE
 
     def test_explicit_false_matches_default(self):
         cfg = {"cron": {"allow_agent_scheduling": False}}
@@ -60,7 +80,7 @@ class TestGateOn:
         disabled = _resolve_cron_disabled_toolsets(cfg)
         assert "cronjob" not in disabled
 
-    def test_interactivity_and_memory_denials_survive_the_gate(self):
+    def test_interactivity_denials_survive_the_gate(self):
         cfg = {"cron": {"allow_agent_scheduling": True}}
         disabled = _resolve_cron_disabled_toolsets(cfg)
         for name in ALWAYS_DISABLED:
