@@ -225,3 +225,71 @@ class TestProviderShutdown:
         assert provider._store is None
         assert MemoryStore._shared == {}
 
+
+
+class TestCategoryMigrationRebuildsBothBanks:
+    """A category migration must rebuild the SOURCE bank as well as the
+    destination one.
+
+    ``update_fact`` rebuilt only ``category or <current category>``, so moving
+    a fact between categories left the bank it departed still counting it.
+    ``remove_fact`` already rebuilds the departed category; this pins the same
+    contract for the migration path. Observed live on 2026-08-19: cat:hypothesis
+    reported fact_count 9 against 7 actual rows after two hypothesis->researched
+    migrations, and cat:researched's updated_at was the instant of the last one.
+    """
+
+    @staticmethod
+    def _bank_count(store, category):
+        row = store._conn.execute(
+            "SELECT fact_count FROM memory_banks WHERE bank_name = ?",
+            (f"cat:{category}",),
+        ).fetchone()
+        return row["fact_count"] if row else 0
+
+    def test_source_bank_is_rebuilt_on_category_change(self, db_path):
+        store = MemoryStore(db_path, hrr_dim=64)
+        try:
+            moving = store.add_fact("alpha beta gamma", category="hypothesis")
+            store.add_fact("delta epsilon zeta", category="hypothesis")
+            store.add_fact("eta theta iota", category="researched")
+
+            assert self._bank_count(store, "hypothesis") == 2
+            assert self._bank_count(store, "researched") == 1
+
+            assert store.update_fact(moving, category="researched") is True
+
+            assert self._bank_count(store, "researched") == 2
+            assert self._bank_count(store, "hypothesis") == 1, (
+                "source bank still counts the migrated fact"
+            )
+        finally:
+            store.close()
+
+    def test_last_fact_out_of_a_category_drops_its_bank(self, db_path):
+        """Migrating the only member must delete the source bank, not leave a
+        bank whose fact_count no longer matches any row."""
+        store = MemoryStore(db_path, hrr_dim=64)
+        try:
+            only = store.add_fact("solitary hypothesis text", category="hypothesis")
+            assert self._bank_count(store, "hypothesis") == 1
+
+            store.update_fact(only, category="researched")
+
+            assert self._bank_count(store, "hypothesis") == 0
+            assert self._bank_count(store, "researched") == 1
+        finally:
+            store.close()
+
+    def test_update_without_category_change_leaves_one_bank_correct(self, db_path):
+        """The common path (no category argument) must keep working."""
+        store = MemoryStore(db_path, hrr_dim=64)
+        try:
+            fid = store.add_fact("content that will be edited", category="lesson")
+            store.add_fact("second lesson", category="lesson")
+
+            store.update_fact(fid, content="edited content for the same lesson")
+
+            assert self._bank_count(store, "lesson") == 2
+        finally:
+            store.close()

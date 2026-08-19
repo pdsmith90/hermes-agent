@@ -488,10 +488,21 @@ class HolographicMemoryProvider(MemoryProvider):
                 return json.dumps({"removed": removed})
 
             elif action == "list":
+                # memory-entry is what MEMORY.md renders, and the dream job's
+                # nightly incumbent review must judge every one of them — a
+                # browsing-sized default silently unsatisfies that mandate
+                # (2026-08-19: 10 of 13 reviewed, and the ones lost at the
+                # trust tie were the newest promotions). Every other category
+                # keeps the small default that holds cron context down; an
+                # explicit limit always wins.
+                category = args.get("category")
+                limit = args.get("limit")
+                if limit is None:
+                    limit = 200 if category == "memory-entry" else 10
                 facts = store.list_facts(
-                    category=args.get("category"),
+                    category=category,
                     min_trust=float(args.get("min_trust", 0.0)),
-                    limit=int(args.get("limit", 10)),
+                    limit=int(limit),
                 )
                 return json.dumps({"facts": facts, "count": len(facts)})
 

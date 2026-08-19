@@ -538,7 +538,8 @@ class MemoryStore:
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT fact_id, trust_score FROM facts WHERE fact_id = ?", (fact_id,)
+                "SELECT fact_id, trust_score, category FROM facts WHERE fact_id = ?",
+                (fact_id,),
             ).fetchone()
             if row is None:
                 return False
@@ -590,11 +591,15 @@ class MemoryStore:
                     self._link_fact_entity(fact_id, entity_id)
                 self._conn.commit()
                 self._compute_hrr_vector(fact_id, row2["content"])
-            # Rebuild bank for relevant category
-            cat = category or self._conn.execute(
-                "SELECT category FROM facts WHERE fact_id = ?", (fact_id,)
-            ).fetchone()["category"]
+            # Rebuild the destination bank — and the SOURCE bank too when the
+            # fact changed category, or the departed bank goes on counting it.
+            # remove_fact already rebuilds the category a fact leaves; a
+            # migration is that same departure with an arrival attached.
+            old_cat = row["category"]
+            cat = category or old_cat
             self._rebuild_bank(cat)
+            if cat != old_cat:
+                self._rebuild_bank(old_cat)
 
             return True
 
