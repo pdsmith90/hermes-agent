@@ -507,7 +507,11 @@ class HolographicMemoryProvider(MemoryProvider):
         try:
             fact_id = int(args["fact_id"])
             helpful = args["action"] == "helpful"
-            result = self._store.record_feedback(fact_id, helpful=helpful)
+            result = self._store.record_feedback(
+                fact_id,
+                helpful=helpful,
+                changed_by=getattr(self, "_session_id", "") or "",
+            )
             return json.dumps(result)
         except KeyError as exc:
             return tool_error(f"Missing required argument: {exc}")

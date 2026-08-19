@@ -4384,8 +4384,8 @@ def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None)
     if db_rows is None:
         lines.append("- Fact-store read-back unavailable for this run.")
     else:
-        created, created_gone, updated, removed = db_rows
-        if not (created or created_gone or updated or removed):
+        created, created_gone, updated, removed, feedback = db_rows
+        if not (created or created_gone or updated or removed or feedback):
             lines.append("- No fact-store writes recorded for this session.")
         else:
             if created or created_gone:
@@ -4401,6 +4401,11 @@ def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None)
                 lines.append(
                     f"- **Updated ({len(updated)}):** "
                     + ", ".join(str(r["fact_id"]) for r in updated)
+                )
+            if feedback:
+                lines.append(
+                    f"- **Feedback ({len(feedback)}):** "
+                    + ", ".join(str(r["fact_id"]) for r in feedback)
                 )
             if removed:
                 lines.append(f"- **Removed ({len(removed)}):**")
@@ -4418,7 +4423,7 @@ def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None)
 
 
 def _fact_write_ledger_rows(session_id: str):
-    """The four read-only queries behind :func:`_fact_write_ledger`.
+    """The five read-only queries behind :func:`_fact_write_ledger`.
 
     Raises on any problem (missing db, corrupt file, schema too old) — the
     caller catches and degrades, keeping the failure-softness contract in one
@@ -4459,9 +4464,17 @@ def _fact_write_ledger_rows(session_id: str):
             " ORDER BY fact_id",
             (session_id,),
         ).fetchall()
+        # Trust changes via fact_feedback were the one mutation invisible to
+        # this ledger until 2026-08-19 (fid 737 proved it): record_feedback
+        # now snapshots op='feedback', so read those back too.
+        feedback = conn.execute(
+            "SELECT DISTINCT fact_id FROM fact_history"
+            " WHERE changed_by_session = ? AND op = 'feedback' ORDER BY fact_id",
+            (session_id,),
+        ).fetchall()
     finally:
         conn.close()
-    return created, created_gone, updated, removed
+    return created, created_gone, updated, removed, feedback
 
 
 def run_job(

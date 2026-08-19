@@ -101,6 +101,20 @@ class TestLedgerAccuracy:
         store.add_fact("unrelated", category="general", source_session=OTHER)
         assert "No fact-store writes recorded" in ledger(SESSION)
 
+    def test_feedback_appears_in_the_ledger(self, ledger, store):
+        # fid 737 on 2026-08-19: daily-review sent fact_feedback and the ledger
+        # showed nothing — trust changes via feedback were the one mutation
+        # path with no audit row. record_feedback now snapshots op='feedback'.
+        fid = store.add_fact("LESSON: rated", category="lesson",
+                             source_session=OTHER)
+        store.record_feedback(fid, helpful=True, changed_by=SESSION)
+
+        block = ledger(SESSION)
+        assert f"**Feedback (1):** {fid}" in block
+        assert "**Updated" not in block
+        # Session-exact: the creator's ledger shows the add, not the feedback.
+        assert "**Feedback" not in ledger(OTHER)
+
     def test_block_asserts_its_own_authority(self, ledger, store):
         store.add_fact("x", category="general", source_session=SESSION)
         block = ledger(SESSION)

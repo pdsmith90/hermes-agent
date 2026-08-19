@@ -652,9 +652,12 @@ class MemoryStore:
         min_trust: float = 0.0,
         limit: int = 50,
     ) -> list[dict]:
-        """Browse facts ordered by trust_score descending.
+        """Browse facts ordered by trust_score descending, fact_id ascending.
 
-        Optionally filter by category and minimum trust score.
+        Optionally filter by category and minimum trust score. The fact_id
+        tiebreak makes a LIMIT cut deterministic: without it, equal-trust
+        facts were returned in arbitrary order, so which one fell off a
+        truncated listing changed between calls.
         """
         with self._lock:
             params: list = [min_trust]
@@ -670,7 +673,7 @@ class MemoryStore:
                 FROM facts
                 WHERE trust_score >= ?
                   {category_clause}
-                ORDER BY trust_score DESC
+                ORDER BY trust_score DESC, fact_id ASC
                 LIMIT ?
             """
             rows = self._conn.execute(sql, params).fetchall()
@@ -697,11 +700,17 @@ class MemoryStore:
             )
             self._conn.commit()
 
-    def record_feedback(self, fact_id: int, helpful: bool) -> dict:
+    def record_feedback(self, fact_id: int, helpful: bool, changed_by: str = "") -> dict:
         """Record user feedback and adjust trust asymmetrically.
 
         helpful=True  -> trust += 0.05, helpful_count += 1
         helpful=False -> trust -= 0.10
+
+        Snapshots the pre-feedback row into fact_history (op='feedback',
+        stamped with *changed_by*) — before this, a feedback write was the
+        one mutation path invisible to both fact_history and the scheduler's
+        per-run ledger, so a mass helpful=False downgrade would have left no
+        audit trail (fid 737 on 2026-08-19 proved the blind spot).
 
         Returns a dict with fact_id, old_trust, new_trust, helpful_count.
         Raises KeyError if fact_id does not exist.
@@ -719,17 +728,18 @@ class MemoryStore:
             new_trust = _clamp_trust(old_trust + delta)
 
             helpful_increment = 1 if helpful else 0
-            self._conn.execute(
-                """
-                UPDATE facts
-                SET trust_score    = ?,
-                    helpful_count  = helpful_count + ?,
-                    updated_at     = CURRENT_TIMESTAMP
-                WHERE fact_id = ?
-                """,
-                (new_trust, helpful_increment, fact_id),
-            )
-            self._conn.commit()
+            with self._write_txn():
+                self._snapshot_fact(fact_id, "feedback", changed_by)
+                self._conn.execute(
+                    """
+                    UPDATE facts
+                    SET trust_score    = ?,
+                        helpful_count  = helpful_count + ?,
+                        updated_at     = CURRENT_TIMESTAMP
+                    WHERE fact_id = ?
+                    """,
+                    (new_trust, helpful_increment, fact_id),
+                )
 
             return {
                 "fact_id":      fact_id,
