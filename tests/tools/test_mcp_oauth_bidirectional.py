@@ -198,6 +198,117 @@ async def test_hermes_provider_forwards_401_triggers_refresh(tmp_path, monkeypat
     await flow.aclose()
 
 
+async def _build_provider(tmp_path):
+    """Seed storage + build a provider the way the tests above do."""
+    from mcp.shared.auth import (
+        OAuthClientInformationFull,
+        OAuthClientMetadata,
+        OAuthToken,
+    )
+    from pydantic import AnyUrl
+
+    from tools.mcp_oauth import HermesTokenStorage
+    from tools.mcp_oauth_manager import _HERMES_PROVIDER_CLS
+
+    storage = HermesTokenStorage("srv")
+    await storage.set_tokens(
+        OAuthToken(
+            access_token="old_access",
+            token_type="Bearer",
+            expires_in=3600,
+            refresh_token="old_refresh",
+        )
+    )
+    await storage.set_client_info(
+        OAuthClientInformationFull(
+            client_id="test-client",
+            redirect_uris=[AnyUrl("http://127.0.0.1:12345/callback")],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+        )
+    )
+    return _HERMES_PROVIDER_CLS(
+        server_name="srv",
+        server_url="https://example.com/mcp",
+        client_metadata=OAuthClientMetadata(
+            redirect_uris=[AnyUrl("http://127.0.0.1:12345/callback")],
+            client_name="Hermes Agent",
+        ),
+        storage=storage,
+        redirect_handler=_noop_redirect,
+        callback_handler=_noop_callback,
+    )
+
+
+@pytest.mark.asyncio
+async def test_early_close_releases_sdk_auth_lock(tmp_path, monkeypatch):
+    """Closing the wrapper mid-flow MUST release the SDK's ``context.lock``.
+
+    The SDK holds ``async with self.context.lock`` across its ``yield``s
+    (oauth2.py:493). httpx closes an auth_flow that never ran to completion,
+    which raises GeneratorExit at the wrapper's ``yield outgoing``. If the
+    wrapper does not close the inner generator in its own task, the inner one
+    is finalized later by the GC on a *different* task and anyio's
+    ``Lock.release()`` raises "The current task is not holding this lock" —
+    leaving the lock held for the life of the process.
+    """
+    import httpx
+
+    from tools.mcp_oauth_manager import reset_manager_for_tests
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reset_manager_for_tests()
+    provider = await _build_provider(tmp_path)
+
+    flow = provider.async_auth_flow(httpx.Request("POST", "https://example.com/mcp"))
+    await flow.__anext__()
+    assert provider.context.lock.locked(), (
+        "precondition: the SDK holds context.lock while suspended at its yield"
+    )
+
+    await flow.aclose()
+
+    assert not provider.context.lock.locked(), (
+        "closing the wrapper must unwind the inner generator's `async with "
+        "self.context.lock`; a leaked lock deadlocks every later auth flow"
+    )
+
+
+@pytest.mark.asyncio
+async def test_flow_after_early_close_does_not_deadlock(tmp_path, monkeypatch):
+    """The symptom the leaked lock produces: the NEXT connect hangs.
+
+    Observed 2026-08-27 — every cron session failed to connect to the
+    `consensus` MCP server with ``CancelledError`` after exactly the 60s
+    ``connect_timeout``, because the first flow of the gateway process leaked
+    the lock and every subsequent flow blocked on acquiring it.
+    """
+    import asyncio
+
+    import httpx
+
+    from tools.mcp_oauth_manager import reset_manager_for_tests
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    reset_manager_for_tests()
+    provider = await _build_provider(tmp_path)
+
+    first = provider.async_auth_flow(httpx.Request("POST", "https://example.com/mcp"))
+    await first.__anext__()
+    await first.aclose()
+
+    second = provider.async_auth_flow(httpx.Request("POST", "https://example.com/mcp"))
+    try:
+        outbound = await asyncio.wait_for(second.__anext__(), timeout=5)
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "second auth flow blocked on context.lock — the first flow leaked it"
+        )
+    assert isinstance(outbound, httpx.Request)
+    await second.aclose()
+
+
 async def _noop_redirect(_url: str) -> None:
     """Redirect handler that does nothing (won't be invoked in these tests)."""
     return None

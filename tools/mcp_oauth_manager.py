@@ -504,6 +504,20 @@ def _make_hermes_provider_class() -> Optional[type]:
                 # 401 branch so a subsequent cold-load skips discovery.
                 self._persist_oauth_metadata_if_changed()
                 return
+            finally:
+                # Close the inner generator HERE, in the task that opened it.
+                # The SDK holds ``async with self.context.lock`` across its
+                # yields (oauth2.py:493), so an inner generator left suspended
+                # gets finalized later by the GC on a DIFFERENT task, where
+                # anyio's Lock.release() raises "The current task is not
+                # holding this lock" — and the lock then stays held for the
+                # life of the process, so every later auth flow blocks until
+                # the connect timeout. httpx closes an auth_flow whenever the
+                # request ends early, so this is a common path, not an edge
+                # case: it took out `consensus` on every cron run of
+                # 2026-08-27 (60s connect timeout reported as CancelledError).
+                # aclose() on an already-exhausted generator is a no-op.
+                await inner.aclose()
 
     return HermesMCPOAuthProvider
 
