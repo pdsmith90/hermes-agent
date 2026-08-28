@@ -60,11 +60,13 @@ hermes skills uninstall <skill-name>
 | [**baoyu-comic**](/docs/user-guide/skills/optional/creative/creative-baoyu-comic) | Knowledge comics (知识漫画): educational, biography, tutorial. |
 | [**concept-diagrams**](/docs/user-guide/skills/optional/creative/creative-concept-diagrams) | Generate flat, minimal educational SVG visuals as HTML. |
 | [**creative-ideation**](/docs/user-guide/skills/optional/creative/creative-creative-ideation) | Generate ideas via named methods from creative practice. |
+| [**draw-your-font**](/docs/user-guide/skills/optional/creative/creative-draw-your-font) | Turn a photo of handwriting into an installable font (TTF/WOFF). |
 | [**heartmula**](/docs/user-guide/skills/optional/creative/creative-heartmula) | HeartMuLa: Suno-like song generation from lyrics + tags. |
 | [**hyperframes**](/docs/user-guide/skills/optional/creative/creative-hyperframes) | Render MP4/WebM videos from HTML compositions. |
 | [**kanban-video-orchestrator**](/docs/user-guide/skills/optional/creative/creative-kanban-video-orchestrator) | Plan and run multi-agent video production pipelines. |
 | [**meme-generation**](/docs/user-guide/skills/optional/creative/creative-meme-generation) | Create meme PNGs from templates with Pillow text overlay. |
 | [**pixel-art**](/docs/user-guide/skills/optional/creative/creative-pixel-art) | Pixel art w/ era palettes (NES, Game Boy, PICO-8). |
+| [**simple-english**](/docs/user-guide/skills/optional/creative/creative-simple-english) | Rewrite technical text to ASD-STE100 Simplified Technical English. |
 | [**social-media-content-calendar**](/docs/user-guide/skills/optional/creative/creative-social-media-content-calendar) | Plan multi-platform social campaigns: briefs to posting. |
 | [**tldraw-offline**](/docs/user-guide/skills/optional/creative/creative-tldraw-offline) | Drive and script tldraw offline canvases with an agent. |
 | [**unreal-mcp**](/docs/user-guide/skills/optional/creative/creative-unreal-mcp) | Automate Unreal Engine editor scenes, actors, and renders. |
@@ -96,7 +98,7 @@ hermes skills uninstall <skill-name>
 
 | Skill | Description |
 |-------|-------------|
-| [**agentmail**](/docs/user-guide/skills/optional/email/email-agentmail) | Give the agent its own inbox: send and receive email. |
+| [**agentmail**](/docs/user-guide/skills/optional/email/email-agentmail) | Use when an agent needs AgentMail CLI email inboxes. |
 
 ## finance
 
@@ -238,6 +240,7 @@ hermes skills uninstall <skill-name>
 |-------|-------------|
 | [**cloudflare-temporary-deploy**](/docs/user-guide/skills/optional/web-development/web-development-cloudflare-temporary-deploy) | Deploy a Worker live, no account, via wrangler --temporary. |
 | [**page-agent**](/docs/user-guide/skills/optional/web-development/web-development-page-agent) | Embed an in-page natural-language GUI copilot in web apps. |
+| [**publish-site**](/docs/user-guide/skills/optional/web-development/web-development-publish-site) | Versioned site deploys to GitHub/Cloudflare/Netlify Pages. |
 
 ## yuanbao
 

@@ -38,9 +38,12 @@ _DOH_PROVIDERS: list[dict] = [
     },
 ]
 
-# Last-resort IPs when DoH is also blocked.  These are stable Telegram Bot API
-# endpoints in the 149.154.160.0/20 block (same seed used by OpenClaw).
-_SEED_FALLBACK_IPS: list[str] = ["149.154.166.110", "149.154.167.220"]
+# Last-resort IPv4 Telegram Bot API endpoints in 149.154.160.0/20
+# (same seed used by OpenClaw). Used when DoH is blocked AND as the
+# first-try connect targets so a blackholed IPv6 AAAA for the hostname
+# cannot pin initialize() (#87015).
+SEED_FALLBACK_IPS: list[str] = ["149.154.166.110", "149.154.167.220"]
+_UNSET = object()
 
 
 def _resolve_proxy_url(target_hosts=None) -> str | None:
@@ -50,12 +53,13 @@ def _resolve_proxy_url(target_hosts=None) -> str | None:
 
 
 class TelegramFallbackTransport(httpx.AsyncBaseTransport):
-    """Retry Telegram Bot API requests via fallback IPs while preserving TLS/SNI.
+    """Reach Telegram Bot API via known IPv4 literals first, hostname last.
 
-    Requests continue to target https://api.telegram.org/... logically, but on
-    connect failures the underlying TCP connection is retried against a known
-    reachable IP. This is effectively the programmatic equivalent of
-    ``curl --resolve api.telegram.org:443:<ip>``.
+    Requests still target https://api.telegram.org/... logically (Host + SNI
+    stay on the hostname). TCP connects to a known A-record IP first so a
+    blackholed IPv6 AAAA cannot pin initialize(). Equivalent to
+    ``curl --resolve api.telegram.org:443:<ip>``. The dual-stack hostname
+    is last resort for IPv6-only networks.
     """
 
     # Bound every pool. httpx defaults to 100 connections per pool, so a wedged
@@ -76,7 +80,10 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
         # Built on demand and discarded on failure — see _reset_fallback.
         self._fallbacks: dict[str, httpx.AsyncHTTPTransport] = {}
         self._fallback_lock = asyncio.Lock()
-        self._sticky_ip: Optional[str] = None
+        # ``_UNSET`` vs ``None`` vs ``str``: unset / sticky hostname / sticky IPv4.
+        # ``None`` cannot mean both "no sticky yet" and "sticky dual-stack
+        # hostname" (#87015).
+        self._sticky_ip: object = _UNSET
         self._sticky_lock = asyncio.Lock()
 
     async def _get_fallback(self, ip: str) -> httpx.AsyncHTTPTransport:
@@ -116,89 +123,76 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
         except Exception as exc:  # closing a broken pool must never mask the real error
             logger.debug("[Telegram] Error closing fallback transport %s: %s", ip, exc)
 
+    def _attempt_order(self) -> list[Optional[str]]:
+        """IPv4 literals first; dual-stack hostname last.
+
+        A blackholed IPv6 path to ``api.telegram.org`` never errors — Happy
+        Eyeballs waits on AAAA until the OS TCP timeout, which can pin the
+        event loop so ``_await_with_thread_deadline`` never fires (#87015).
+        Known A-record IPs connect over IPv4 immediately. The hostname is
+        kept as a last resort for IPv6-only networks.
+        """
+        order: list[Optional[str]] = []
+        if self._sticky_ip is not _UNSET:
+            sticky = self._sticky_ip
+            order.append(sticky if sticky is None else str(sticky))
+        for ip in self._fallback_ips:
+            if ip not in order:
+                order.append(ip)
+        if None not in order:
+            order.append(None)
+        return order
+
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         if request.url.host != _TELEGRAM_API_HOST or not self._fallback_ips:
             return await self._primary.handle_async_request(request)
 
-        sticky_ip = self._sticky_ip
-        attempt_order: list[Optional[str]] = [sticky_ip] if sticky_ip else [None]
-        if sticky_ip:
-            attempt_order.append(None)  # retry primary DNS after sticky failure
-        for ip in self._fallback_ips:
-            if ip != sticky_ip:
-                attempt_order.append(ip)
+        attempt_order = self._attempt_order()
 
-        # Per-attempt outcomes below are logged at DEBUG, not WARNING.
-        #
-        # One attempt failing and the next succeeding is this transport doing
-        # exactly its job. Telegram's edge closes idle keep-alive connections,
-        # so a pooled socket going stale between getUpdates long-poll cycles is
-        # routine and self-healing: the observed steady state is an isolated
-        # failure/recovery PAIR every few hours, with no network event of any
-        # kind around it (no route change, no resolver failure — the exception
-        # is a bare ConnectError whose str() is empty, i.e. socket-level, not
-        # DNS). Emitting a WARNING per attempt turned that ordinary recycling
-        # into ~13 WARNING lines/day, which the nightly error triage read as
-        # the single largest error source on the box and mined across several
-        # nights into a "root cause identified / FIX priority" investigation of
-        # something that was never broken.
-        #
-        # Escalation therefore happens ONCE, after the loop, and only when
-        # every path has failed and the request is genuinely about to fail.
         last_error: Exception | None = None
-        failures: list[str] = []
         for ip in attempt_order:
             candidate = request if ip is None else _rewrite_request_for_ip(request, ip)
             transport = self._primary if ip is None else await self._get_fallback(ip)
             try:
                 response = await transport.handle_async_request(candidate)
-                if ip is not None and self._sticky_ip != ip:
+                if self._sticky_ip is _UNSET or self._sticky_ip != ip:
                     async with self._sticky_lock:
-                        if self._sticky_ip != ip:
+                        if self._sticky_ip is _UNSET or self._sticky_ip != ip:
                             self._sticky_ip = ip
-                            logger.debug(
-                                "[Telegram] Primary api.telegram.org path unreachable; using sticky fallback IP %s",
-                                ip,
-                            )
+                            if ip is not None:
+                                log = logger.warning if last_error is not None else logger.info
+                                log(
+                                    "[Telegram] Using sticky IPv4 Telegram API path %s "
+                                    "(dual-stack hostname tried last — #87015)",
+                                    ip,
+                                )
                 return response
             except Exception as exc:
                 last_error = exc
                 if not _is_retryable_connect_error(exc):
                     raise
-                # ConnectError/ConnectTimeout frequently carry no message at
-                # all, which rendered the old logs as "connection failed ()".
-                # Fall back to the class name so the record stays identifiable.
-                detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
-                failures.append(f"{ip or 'primary-DNS'} ({detail})")
-                if ip is not None and ip == self._sticky_ip:
+                if self._sticky_ip is not _UNSET and ip == self._sticky_ip:
                     async with self._sticky_lock:
-                        if self._sticky_ip == ip:
-                            self._sticky_ip = None
-                            logger.debug(
-                                "[Telegram] Sticky fallback IP %s failed; resetting to primary DNS path",
-                                ip,
+                        if self._sticky_ip is not _UNSET and self._sticky_ip == ip:
+                            self._sticky_ip = _UNSET
+                            logger.warning(
+                                "[Telegram] Sticky Telegram path %s failed; "
+                                "re-walking IPv4 literals before the hostname",
+                                ip if ip is not None else "api.telegram.org",
                             )
                 if ip is None:
                     await self._reset_primary(transport)
-                    logger.debug(
-                        "[Telegram] Primary api.telegram.org connection failed (%s); trying fallback IPs %s",
-                        detail,
-                        ", ".join(self._fallback_ips),
+                    logger.warning(
+                        "[Telegram] Dual-stack api.telegram.org path failed (%s)",
+                        exc,
                     )
                     continue
-                logger.debug("[Telegram] Fallback IP %s failed: %s", ip, detail)
+                logger.warning("[Telegram] IPv4 Telegram API IP %s failed: %s", ip, exc)
                 await self._reset_fallback(ip)
                 continue
 
         if last_error is None:
             raise RuntimeError("All Telegram fallback IPs exhausted but no error was recorded")
-        # Every path failed, so the caller's request fails too. THIS is the
-        # event worth waking someone for, and it carries the whole picture in
-        # one line rather than one line per attempt.
-        logger.warning(
-            "[Telegram] All api.telegram.org paths failed for this request: %s",
-            "; ".join(failures) or "no attempts recorded",
-        )
         raise last_error
 
     async def aclose(self) -> None:
@@ -328,9 +322,9 @@ async def discover_fallback_ips() -> list[str]:
     logger.info(
         "DoH discovery yielded no usable IPs (system DNS: %s); using seed fallback IPs %s",
         ", ".join(system_ips) or "unknown",
-        ", ".join(_SEED_FALLBACK_IPS),
+        ", ".join(SEED_FALLBACK_IPS),
     )
-    return list(_SEED_FALLBACK_IPS)
+    return list(SEED_FALLBACK_IPS)
 
 
 def _rewrite_request_for_ip(request: httpx.Request, ip: str) -> httpx.Request:
