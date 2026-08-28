@@ -932,7 +932,7 @@ class MemoryStore:
             fact_count = len(vectors)
 
             # SNR is recorded but NOT warned about: the bundled bank vector has
-            # no reader. FactRetriever.probe_entity() looks the row up and uses
+            # no reader. FactRetriever.probe() looks the row up and uses
             # only its existence to select a branch, then scores against the
             # individual fact vectors ("deliberately equivalent to the direct
             # scoring below" — see retrieval.py). A degrading bank SNR therefore
