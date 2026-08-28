@@ -275,6 +275,10 @@ _CHECK_FN_CACHE_MAX = 512
 _check_fn_cache: Dict[tuple[Callable, Optional[str]], tuple[float, bool]] = {}
 # Monotonic timestamp of the most recent True result per check_fn.
 _check_fn_last_good: Dict[tuple[Callable, Optional[str]], float] = {}
+# Qualnames already WARNED about in this process. Several checks are permanent,
+# correct "not available in this deployment" verdicts, and repeating them on
+# every TTL expiry is what trains readers to skim this log (fid 1056).
+_check_fn_warned: set = set()
 _check_fn_cache_lock = threading.Lock()
 CHECK_FN_CACHE_BYPASS = ""
 
@@ -382,9 +386,23 @@ def _check_fn_cached(fn: Callable) -> bool:
 
         # No recent success (or grace expired) — honor the failure. Log it so
         # silent tool loss in quiet mode (subagents) is diagnosable.
-        logger.warning(
+        #
+        # Only the FIRST failure of a given check in this process warns; repeats
+        # drop to DEBUG. Several of these are permanent, CORRECT verdicts rather
+        # than faults — browser_cdp gates itself off for the default backend by
+        # design (see its docstring), and the BFL / image-gen / computer-use
+        # probes have nothing configured to reach — so they fail on every session
+        # and re-log on every TTL expiry: 27 WARNING lines across 9 distinct
+        # checks on 2026-08-27, not one of them news after the first. One line
+        # per check still names every tool actually lost, which is the whole
+        # point of this log statement.
+        _qual = getattr(fn, "__qualname__", str(fn))
+        _first_warn = _qual not in _check_fn_warned
+        _check_fn_warned.add(_qual)
+        logger.log(
+            logging.WARNING if _first_warn else logging.DEBUG,
             "check_fn %s %s; dependent tools will be unavailable this turn",
-            getattr(fn, "__qualname__", fn),
+            _qual,
             "raised" if raised else "returned False",
         )
         _check_fn_cache[cache_key] = (now, False)
@@ -397,6 +415,8 @@ def invalidate_check_fn_cache() -> None:
     with _check_fn_cache_lock:
         _check_fn_cache.clear()
         _check_fn_last_good.clear()
+        # Config changed: a tool that just became (un)available is news again.
+        _check_fn_warned.clear()
 
 
 def get_cached_check_fn_result(fn: Callable) -> Optional[bool]:

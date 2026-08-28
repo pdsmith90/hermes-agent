@@ -137,6 +137,82 @@ class TestGetDefinitions:
         assert calls["count"] == 1
 
 
+class TestCheckFnFailureLogging:
+    """A permanently-unavailable check must not warn on every TTL expiry.
+
+    browser_cdp gates itself off for the default backend BY DESIGN, and the
+    BFL / image-gen / computer-use probes have nothing configured to reach, so
+    they fail on every session and used to re-log each time — 27 WARNING lines
+    across 9 distinct checks on 2026-08-27, none of them news after the first
+    (fid 1056). The first failure must still warn, or genuine silent tool loss
+    stops being diagnosable.
+    """
+
+    def _run(self, fn, caplog):
+        from tools import registry
+
+        registry.invalidate_check_fn_cache()
+        with caplog.at_level(logging.DEBUG, logger=registry.logger.name):
+            first = registry._check_fn_cached(fn)
+            registry._check_fn_cache.clear()      # force a re-probe, as a TTL expiry does
+            second = registry._check_fn_cached(fn)
+        return first, second
+
+    def test_repeat_failure_drops_to_debug(self, caplog):
+        from tools import registry
+
+        def always_false():
+            return False
+
+        first, second = self._run(always_false, caplog)
+        assert first is False and second is False
+
+        lines = [r for r in caplog.records if "always_false" in r.getMessage()]
+        assert len(lines) == 2, "both failures must still be logged somewhere"
+        assert lines[0].levelno == logging.WARNING, "first failure stays a WARNING"
+        assert lines[1].levelno == logging.DEBUG, "the repeat must not warn again"
+        registry.invalidate_check_fn_cache()
+
+    def test_a_different_check_still_warns(self, caplog):
+        """Deduping is per-check — one noisy probe must not mask another."""
+        from tools import registry
+
+        def noisy_a():
+            return False
+
+        def noisy_b():
+            return False
+
+        registry.invalidate_check_fn_cache()
+        with caplog.at_level(logging.DEBUG, logger=registry.logger.name):
+            registry._check_fn_cached(noisy_a)
+            registry._check_fn_cache.clear()
+            registry._check_fn_cached(noisy_b)
+
+        warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("noisy_a" in r.getMessage() for r in warns)
+        assert any("noisy_b" in r.getMessage() for r in warns)
+        registry.invalidate_check_fn_cache()
+
+    def test_invalidate_makes_it_news_again(self, caplog):
+        """After a config change the tool's availability is news once more."""
+        from tools import registry
+
+        def gone():
+            return False
+
+        registry.invalidate_check_fn_cache()
+        with caplog.at_level(logging.DEBUG, logger=registry.logger.name):
+            registry._check_fn_cached(gone)
+            registry.invalidate_check_fn_cache()   # e.g. `hermes tools enable`
+            registry._check_fn_cached(gone)
+
+        warns = [r for r in caplog.records
+                 if r.levelno == logging.WARNING and "gone" in r.getMessage()]
+        assert len(warns) == 2, "a config change must re-arm the warning"
+        registry.invalidate_check_fn_cache()
+
+
 class TestUnknownToolDispatch:
     def test_returns_error_json(self):
         reg = ToolRegistry()
