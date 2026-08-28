@@ -930,8 +930,16 @@ class MemoryStore:
             bank_vector = hrr.bundle(*vectors)
             fact_count = len(vectors)
 
-            # Check SNR
-            hrr.snr_estimate(self.hrr_dim, fact_count)
+            # SNR is recorded but NOT warned about: the bundled bank vector has
+            # no reader. FactRetriever.probe_entity() looks the row up and uses
+            # only its existence to select a branch, then scores against the
+            # individual fact vectors ("deliberately equivalent to the direct
+            # scoring below" — see retrieval.py). A degrading bank SNR therefore
+            # cannot degrade any retrieval, and warning that it might is what
+            # sends the next reader off to raise hrr_dim or prune facts for
+            # nothing. cat:lesson crossed dim/4 on 2026-08-28 and would have
+            # logged this on every lesson write from then on.
+            hrr.snr_estimate(self.hrr_dim, fact_count, warn=False)
 
             self._conn.execute(
                 """

@@ -317,13 +317,16 @@ def bytes_to_phases(data: bytes, dim: int | None = None) -> "np.ndarray":
     return numpy.frombuffer(data, dtype=numpy.float64).copy()
 
 
-def snr_estimate(dim: int, n_items: int) -> float:
+def snr_estimate(dim: int, n_items: int, warn: bool = True) -> float:
     """Signal-to-noise ratio estimate for holographic storage.
 
     SNR = sqrt(dim / n_items) when n_items > 0, else inf.
 
-    The SNR falls below 2.0 when n_items > dim / 4, meaning retrieval
-    errors become likely. Logs a warning when this threshold is crossed.
+    The SNR falls below 2.0 when n_items > dim / 4, meaning retrieval errors
+    become likely. Logs a warning when that threshold is crossed, unless
+    *warn* is False — pass False when the bundle being measured has no reader,
+    because "retrieval accuracy may degrade" is then a false statement about
+    a vector nothing scores against.
     """
     _require_numpy()
 
@@ -332,7 +335,7 @@ def snr_estimate(dim: int, n_items: int) -> float:
 
     snr = math.sqrt(dim / n_items)
 
-    if snr < 2.0:
+    if warn and snr < 2.0:
         logger.warning(
             "HRR storage near capacity: SNR=%.2f (dim=%d, n_items=%d). "
             "Retrieval accuracy may degrade. Consider increasing dim or reducing stored items.",
