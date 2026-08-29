@@ -148,5 +148,41 @@ def test_update_rotates_config_yaml_model_mirror(hermes_home):
 # ---------------------------------------------------------------------------
 # Suppression round-trip: delete sticks, re-add lifts it
 # ---------------------------------------------------------------------------
+def test_rotation_preserves_config_yaml_comments(hermes_home):
+    """The mirror scrub rewrites the whole config.yaml; it must not strip user
+    comments. 2026-08-24: a Copilot token rotation deleted all 50 comment lines
+    from a live config because the scrub wrote via plain yaml.dump."""
+    old = "sk-oe-" + "h" * 24
+    new = "sk-oe-" + "i" * 24
+    _write_env(hermes_home, OPENAI_API_KEY=old)
+    _write_config(
+        hermes_home,
+        "# top-of-file comment: why this config is shaped this way\n"
+        "model:\n"
+        "  provider: custom\n"
+        "  # block comment: per-slot budget rationale\n"
+        "  default: my-model\n"
+        "  base_url: https://llm.example.test/v1\n"
+        f"  api_key: {old}\n"
+        "display:\n"
+        "  memory_notifications: 'on'   # quoted deliberately (YAML 1.1 bool trap)\n",
+    )
 
+    resp = client.put(
+        "/api/env", json={"key": "OPENAI_API_KEY", "value": new}, headers=HEADERS
+    )
+    assert resp.status_code == 200
+    assert "model.api_key" in resp.json().get("config_updates", [])
 
+    cfg_text = hermes_home.joinpath("config.yaml").read_text(encoding="utf-8")
+    assert new in cfg_text and old not in cfg_text
+    assert "# top-of-file comment: why this config is shaped this way" in cfg_text
+    assert "# block comment: per-slot budget rationale" in cfg_text
+    assert "# quoted deliberately (YAML 1.1 bool trap)" in cfg_text
+    # atomic_roundtrip_yaml_save force-quotes YAML-1.1-ambiguous words with
+    # DOUBLE quotes by design, so 'on' may normalize to "on" — either is a
+    # string; what must never happen is a bare `on` (bool True under YAML 1.1).
+    assert (
+        "memory_notifications: 'on'" in cfg_text
+        or 'memory_notifications: "on"' in cfg_text
+    ), "'on' must stay quoted (bare on parses as bool under YAML 1.1)"

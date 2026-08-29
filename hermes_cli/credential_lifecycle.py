@@ -121,7 +121,7 @@ def _scrub_config_yaml_mirrors(old_value: str, new_value: str | None) -> List[st
     """
     if not old_value:
         return []
-    from utils import atomic_yaml_write, fast_safe_load
+    from utils import atomic_roundtrip_yaml_save, fast_safe_load
 
     from hermes_cli.config import (
         get_config_path,
@@ -171,7 +171,13 @@ def _scrub_config_yaml_mirrors(old_value: str, new_value: str | None) -> List[st
 
     if touched:
         require_readable_config_before_write(config_path)
-        atomic_yaml_write(config_path, user_config, sort_keys=False)
+        # Comment-preserving on purpose: config.yaml is user-edited and this
+        # rewrite fires unattended on credential rotation. atomic_yaml_write's
+        # plain yaml.dump stripped every comment from a live config here on
+        # 2026-08-24 (Copilot token churn at 01:22); the round-trip saver is
+        # the designed replacement for this mutate-loaded-dict-and-persist
+        # shape, and force-quotes YAML-1.1-ambiguous strings itself.
+        atomic_roundtrip_yaml_save(config_path, user_config)
     return touched
 
 
