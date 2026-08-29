@@ -103,6 +103,29 @@ _UNHELPFUL_DELTA = -0.10
 _TRUST_MIN       =  0.0
 _TRUST_MAX       =  1.0
 
+# --- automatic supersession demotion -------------------------------------
+# Ranking is `cross_encoder_score * trust_score`, and the cross-encoder saturates
+# (measured 0.9997-0.9988 across eight on-topic facts — a 0.0009 spread against a
+# 0.20 trust spread), so trust is effectively the ONLY discriminator. A fact that
+# a later fact explicitly retracts therefore keeps outranking its own correction
+# forever. Found 2026-08-28 on a store where the most-revised topics were the
+# worst affected: one query returned four retracted answers above both current
+# ones, another returned first a verdict a later fact calls "INVERTED". Writing
+# the retraction was never enough — nothing demoted what it retracted.
+#
+# ACTIVE VOICE ONLY. `superseded by fid N` names the NEWER fact, so matching it
+# would demote exactly the wrong row; the passive form is deliberately absent.
+# The `target < fact_id` guard in _demote_superseded is the backstop.
+_SUPERSESSION_RE = re.compile(
+    r"\b(?:supersede|supersedes|superseding|corrects?|correcting|"
+    r"refutes?|invalidates?|obsoletes?)\s+fid[\s=:#]*(\d{1,7})\b",
+    re.IGNORECASE,
+)
+# Floor, not a fixed delta: a fact may be retracted by several later facts, and
+# three mentions should not drive a row to zero. 0.30 keeps it at the default
+# search floor — still reachable, ranked below anything that corrected it.
+_SUPERSESSION_FLOOR = 0.30
+
 # Categories remove_fact() refuses without force=True. These are the durable
 # lanes — a paper read, a lesson learned, a stated user preference — that an
 # unattended consolidation run must never prune. fact_history now keeps a
@@ -405,7 +428,62 @@ class MemoryStore:
             self._compute_hrr_vector(fact_id, content)
             self._rebuild_bank(category)
 
+            self._demote_superseded(fact_id, content)
+
             return fact_id
+
+    def _demote_superseded(self, fact_id: int, content: str) -> list[int]:
+        """Demote any strictly-older fact this one explicitly retracts.
+
+        Called only on the genuine-insert path — the duplicate-content branch
+        returns before this, so re-writing the same fact cannot demote its
+        target twice.
+
+        Deliberately here rather than in the scheduler's per-run ledger: the
+        ledger sees only what the nightly cron writes, while every writer on the
+        box — cron, an interactive session, and scripts/hermes_memory_mcp.py's
+        ``remember`` (which imports this class directly and loads no Hermes
+        plugins) — goes through add_fact. One place covers all three.
+
+        Never raises. A missed demotion leaves a stale row ranked high, which is
+        the bug this fixes; an exception escaping here would lose the fact write
+        itself, which is strictly worse. Returns the fids actually demoted.
+        """
+        demoted: list[int] = []
+        try:
+            targets = {int(m) for m in _SUPERSESSION_RE.findall(content)}
+        except Exception:                                    # pragma: no cover
+            return demoted
+        for target in sorted(targets):
+            # Strictly older only. A fact cannot retract one written after it,
+            # so a forward reference is a parse artefact (or the passive voice
+            # slipping through) and must never cost the newer row its trust.
+            if not 0 < target < fact_id:
+                continue
+            try:
+                # Bounded: at most two steps of _UNHELPFUL_DELTA per retraction,
+                # so one write can never sink a row further than 0.50 -> 0.30.
+                for _ in range(2):
+                    row = self._conn.execute(
+                        "SELECT trust_score FROM facts WHERE fact_id = ?", (target,)
+                    ).fetchone()
+                    # Epsilon, not a bare <=. Repeated -0.10 steps land on
+                    # 0.30000000000000004, which compares GREATER than 0.30, so
+                    # a bare test lets the next retraction punch through the
+                    # floor to 0.20 and hide the row from default search.
+                    if row is None or row["trust_score"] <= _SUPERSESSION_FLOOR + 1e-9:
+                        break
+                    self.record_feedback(
+                        target, helpful=False,
+                        changed_by=f"auto-supersession: retracted by fid {fact_id}",
+                    )
+                    demoted.append(target)
+            except Exception:
+                logger.warning(
+                    "supersession demotion failed for fid %s (retracted by %s)",
+                    target, fact_id, exc_info=True,
+                )
+        return demoted
 
     def search_facts(
         self,
