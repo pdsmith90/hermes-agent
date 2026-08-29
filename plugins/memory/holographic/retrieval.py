@@ -87,6 +87,9 @@ class FactRetriever:
         2. Jaccard boost: Token overlap between query and fact content
         3. Trust weighting: final_score = relevance * trust_score
         4. Temporal decay (optional): decay = 0.5^(age_days / half_life)
+        5. Cross-encoder rerank (optional): score = ce * (0.5 + 0.5*trust) *
+           decay — same pool, reordered; the trust term is clamped there
+           because the cross-encoder saturates. See stage 3 below.
 
         Returns list of dicts with fact data + 'score' field, sorted by score desc.
         """
@@ -149,9 +152,18 @@ class FactRetriever:
             # Trust weighting
             score = relevance * fact["trust_score"]
 
-            # Optional temporal decay
-            if self.half_life > 0:
-                score *= self._temporal_decay(fact.get("updated_at") or fact.get("created_at"))
+            # Optional temporal decay. Stashed on the fact (and popped off with
+            # hrr_vector below) because stage 3 recomputes the score from
+            # scratch and has to apply the SAME factor: until 2026-08-29 it
+            # silently dropped it, which made temporal_decay_half_life dead
+            # config whenever the reranker was up — i.e. always, in production.
+            # Verified on a copy of the live store: top-5 was byte-identical at
+            # half_life 0 and 60 with the reranker reachable.
+            decay = self._temporal_decay(
+                fact.get("updated_at") or fact.get("created_at")
+            )
+            fact["_decay"] = decay
+            score *= decay
 
             fact["score"] = score
             scored.append(fact)
@@ -171,14 +183,40 @@ class FactRetriever:
                 for fact, ce_score in zip(scored, ce):
                     # ce_score is already P(yes) in [0,1] (RANK pooling softmaxes
                     # in-graph for QWEN3). Trust weighting is preserved so a
-                    # low-trust fact cannot win on relevance alone.
-                    fact["score"] = ce_score * fact["trust_score"]
+                    # low-trust fact cannot win on relevance alone, and the
+                    # decay factor from stage 2 is carried through — dropping it
+                    # here is what made half_life inert.
+                    #
+                    # The trust term is CLAMPED to [0.5, 1.0] on THIS path only
+                    # (2026-08-29). Within one topic the cross-encoder is
+                    # near-binary: measured 0.9997-0.9988 across seven on-topic
+                    # facts, a 0.0009 spread against a 0.20 trust spread, so a
+                    # raw 0.30-1.00 multiplier decided the order by itself. It
+                    # ranked fid 986 (trust 0.70, text reads "RETIRED", ce
+                    # 0.9599) first and fid 1305 (trust 0.50, the current
+                    # answer, ce 0.9990) seventh — burying a real 4% relevance
+                    # deficit the reranker HAD detected. `0.5 + 0.5*trust` says
+                    # trust may at most halve a fact's score: a 0.30 lineage row
+                    # still loses ~13% to a 0.50 current one and cannot win back
+                    # a 0.1% ce edge, while a stale-but-trusted row no longer
+                    # beats a fresher correction on trust alone. The additive
+                    # blend above is deliberately NOT clamped — its relevance
+                    # term has real dynamic range, so trust cannot swamp it
+                    # there, and the tuned fts/jaccard/hrr weights assume the
+                    # raw multiplier.
+                    fact["score"] = (
+                        ce_score
+                        * (0.5 + 0.5 * fact["trust_score"])
+                        * fact.get("_decay", 1.0)
+                    )
                 scored.sort(key=lambda x: x["score"], reverse=True)
 
         results = scored[:limit]
-        # Strip raw HRR bytes — callers expect JSON-serializable dicts
+        # Strip raw HRR bytes and the internal decay stash — callers expect
+        # JSON-serializable dicts holding only store columns plus "score".
         for fact in results:
             fact.pop("hrr_vector", None)
+            fact.pop("_decay", None)
         # Surfacing counts as retrieval: this path serves per-turn prefetch
         # injection and the fact_store search action, neither of which was
         # reflected in retrieval_count before.

@@ -1,8 +1,9 @@
 """Tests for automatic demotion of facts a later fact explicitly retracts.
 
-Ranking is ``cross_encoder_score * trust_score`` and the cross-encoder saturates
-(measured 0.9997-0.9988 across eight on-topic facts), so trust is effectively the
-only discriminator. Before this hook, writing a retraction did nothing to what it
+Ranking on the reranked path is ``cross_encoder_score * (0.5 + 0.5*trust) *
+temporal_decay`` and the cross-encoder saturates (measured 0.9997-0.9988 across
+eight on-topic facts), so trust and age are what separate facts inside one
+topic. Before this hook, writing a retraction did nothing to what it
 retracted: on 2026-08-28 one query returned four retracted answers above both
 current ones, and another returned first a verdict a later fact calls "INVERTED".
 

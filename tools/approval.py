@@ -2395,6 +2395,18 @@ def _command_detection_variants(command: str):
     grep_safe, _ = _grep_safe_detection_variant(normalized)
     seen = {grep_safe}
     yield grep_safe
+    # Collapsed-whitespace variant. Normalization does not squeeze runs of
+    # spaces, and every deny glob and dangerous pattern is written with single
+    # spaces, so `hermes  cron  create x` matched NOTHING while
+    # `hermes cron create x` was blocked — one extra space defeated the whole
+    # list. Found 2026-08-14, still live 2026-08-29. Derived from grep_safe, not
+    # from `normalized`, so grep operands stay masked and this cannot resurrect
+    # a pattern the grep-safe pass deliberately hid. Additive: a new variant can
+    # only ever produce MORE matches, never fewer, so no existing allow breaks.
+    squeezed = re.sub(r"\s+", " ", grep_safe).strip()
+    if squeezed and squeezed not in seen:
+        seen.add(squeezed)
+        yield squeezed
     # Windows-path variant (#69472): normalization treats backslashes as
     # shell escapes and strips them, so `del C:\Users\me\.ssh\id_rsa`
     # reaches the patterns as `del C:Usersme.sshid_rsa` — no path rule can

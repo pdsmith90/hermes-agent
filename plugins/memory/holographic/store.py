@@ -104,13 +104,17 @@ _TRUST_MIN       =  0.0
 _TRUST_MAX       =  1.0
 
 # --- automatic supersession demotion -------------------------------------
-# Ranking is `cross_encoder_score * trust_score`, and the cross-encoder saturates
-# (measured 0.9997-0.9988 across eight on-topic facts — a 0.0009 spread against a
-# 0.20 trust spread), so trust is effectively the ONLY discriminator. A fact that
-# a later fact explicitly retracts therefore keeps outranking its own correction
-# forever. Found 2026-08-28 on a store where the most-revised topics were the
-# worst affected: one query returned four retracted answers above both current
-# ones, another returned first a verdict a later fact calls "INVERTED". Writing
+# Ranking on the reranked path is `cross_encoder_score * (0.5 + 0.5*trust) *
+# temporal_decay` (retrieval.py; the trust clamp and the decay term both landed
+# 2026-08-29). The cross-encoder saturates — measured 0.9997-0.9988 across eight
+# on-topic facts, a 0.0009 spread — so trust and age are still what separate
+# facts inside one topic, and the clamp deliberately leaves a demoted 0.30 row
+# ~13% below a current 0.50 one, far more than the ce spread it could win back.
+# A fact that a later fact explicitly retracts therefore keeps outranking its
+# own correction forever unless something demotes it. Found 2026-08-28 on a
+# store where the most-revised topics were the worst affected: one query
+# returned four retracted answers above both current ones, another returned
+# first a verdict a later fact calls "INVERTED". Writing
 # the retraction was never enough — nothing demoted what it retracted.
 #
 # ACTIVE VOICE ONLY. `superseded by fid N` names the NEWER fact, so matching it
@@ -125,6 +129,22 @@ _SUPERSESSION_RE = re.compile(
 # three mentions should not drive a row to zero. 0.30 keeps it at the default
 # search floor — still reachable, ranked below anything that corrected it.
 _SUPERSESSION_FLOOR = 0.30
+
+# --- near-duplicate guard (see _near_duplicate) ---------------------------
+# Token-Jaccard at or above this against a same-category fact written in the
+# last _NEAR_DUP_WINDOW_DAYS returns that row instead of inserting a second
+# copy. 0.75 is set from the store, not from taste: replaying the guard over
+# all 880 facts on 2026-08-28 fires on exactly ONE historical pair (867/1113 at
+# 0.831, the same research question answered twice nine days apart) and the
+# next in-scope pair down is 0.574. The empty band between them is where the
+# threshold belongs — a false positive silently discards a real write, which is
+# worse than the duplicate it would have prevented.
+_NEAR_DUP_JACCARD = 0.75
+_NEAR_DUP_WINDOW_DAYS = 30
+# Below this many distinct tokens one word is worth more than 5% of the score,
+# so Jaccard stops resolving. Only 10 of 880 stored facts are this short (p05
+# is 32 tokens, median 95); they forgo the guard rather than risk it.
+_NEAR_DUP_MIN_TOKENS = 20
 
 # Categories remove_fact() refuses without force=True. These are the durable
 # lanes — a paper read, a lesson learned, a stated user preference — that an
@@ -386,9 +406,11 @@ class MemoryStore:
     ) -> int:
         """Insert a fact and return its fact_id.
 
-        Deduplicates by content (UNIQUE constraint). On duplicate, returns
-        the existing fact_id without modifying the row. Extracts entities from
-        the content and links them to the fact.
+        Deduplicates by content (UNIQUE constraint) and, since 2026-08-29, by
+        token-Jaccard against recent same-category facts (see
+        _near_duplicate). On either kind of duplicate, returns the existing
+        fact_id without modifying the row. Extracts entities from the content
+        and links them to the fact.
 
         source_session records which session wrote the fact, joinable against
         state.db / the trace archive — the provenance that made the 2026-08-14
@@ -399,6 +421,14 @@ class MemoryStore:
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
+
+            # Near-duplicate: return the standing row, insert nothing. Placed
+            # before the INSERT so it shares the exact-duplicate branch's
+            # contract — including returning before _demote_superseded(), so a
+            # restatement cannot demote the same target a second time.
+            near = self._near_duplicate(content, category)
+            if near is not None:
+                return near
 
             try:
                 cur = self._conn.execute(
@@ -431,6 +461,84 @@ class MemoryStore:
             self._demote_superseded(fact_id, content)
 
             return fact_id
+
+    def _near_duplicate(self, content: str, category: str) -> int | None:
+        """Return the fact_id this content merely restates, or None.
+
+        UNIQUE(content) catches only byte-identical writes, so a promotion, a
+        reworded prefix, or the same conclusion re-derived a week later inserted
+        a competing row: measured over 871 facts on 2026-08-28, 7 pairs at
+        Jaccard >= 0.55 and two effectively identical (fids 89/468 at 1.00,
+        85/878 at 0.98; 919/1174 differ only by "LESSON:" vs
+        "KEY PATTERN/LESSON:"). Copies split trust and retrieval_count between
+        them and crowd the limit-5 prefetch window with one finding.
+
+        Scoped to the same category and the last 30 days: the widest lane on
+        this store is 234 rows (lesson), measured at 7.2 ms per call against a
+        write path that already re-encodes an HRR vector and rebuilds a category
+        bank. The scope also means a deliberate cross-lane restatement — a
+        lesson promoted to a memory-entry, which the MEMORY.md renderer depends
+        on — is correctly NOT a duplicate.
+
+        POLARITY, AND WHY SUPERSESSION WRITES ARE EXEMPT: Jaccard cannot see
+        polarity, so a long fact that corrects an earlier one by a single word
+        ("does" -> "does not") scores ~0.98 and looks like a restatement. That
+        is the highest-value write in the store, not a duplicate. Any content
+        naming the fid it retracts is therefore skipped outright — measured on a
+        real pair, the correction scored 0.861, was dropped, AND the target's
+        trust stayed at 0.50 instead of 0.30, silently defeating
+        _demote_superseded (fork da2f371005), which is the load-bearing half of
+        the supersession fix. Losing the correction and the demotion together is
+        strictly worse than keeping one near-duplicate row.
+
+        Never raises: a guard that loses fact writes is worse than the
+        duplicates it exists to stop.
+        """
+        # Before any similarity work: a write that names the fid it supersedes
+        # is by definition intended to change state, however much of the earlier
+        # wording it reuses.
+        if _SUPERSESSION_RE.search(content):
+            return None
+        try:
+            # Lazy, and via the retriever, so the guard and the Jaccard term in
+            # ranked search can never disagree about what a token is (same
+            # reason search_facts imports it here rather than duplicating the
+            # sanitizer).
+            from plugins.memory.holographic.retrieval import FactRetriever
+
+            tokens = FactRetriever._tokenize(content)
+            if len(tokens) < _NEAR_DUP_MIN_TOKENS:
+                return None
+            rows = self._conn.execute(
+                """
+                SELECT fact_id, content FROM facts
+                 WHERE category = ?
+                   AND created_at >= datetime('now', ?)
+                """,
+                (category, f"-{_NEAR_DUP_WINDOW_DAYS} days"),
+            ).fetchall()
+            best_id: int | None = None
+            best = 0.0
+            for row in rows:
+                sim = FactRetriever._jaccard_similarity(
+                    tokens, FactRetriever._tokenize(row["content"])
+                )
+                if sim > best:
+                    best_id, best = int(row["fact_id"]), sim
+            if best_id is not None and best >= _NEAR_DUP_JACCARD:
+                # WARNING, not debug: this drops a write on the floor. It has to
+                # be greppable in agent.log when a session insists it stored
+                # something the store does not have.
+                logger.warning(
+                    "near-duplicate write suppressed: Jaccard %.3f against "
+                    "fid %s (category=%s) — returning the existing row, "
+                    "nothing inserted",
+                    best, best_id, category,
+                )
+                return best_id
+        except Exception:
+            logger.debug("near-duplicate check failed", exc_info=True)
+        return None
 
     def _demote_superseded(self, fact_id: int, content: str) -> list[int]:
         """Demote any strictly-older fact this one explicitly retracts.
