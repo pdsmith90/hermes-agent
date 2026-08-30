@@ -240,6 +240,42 @@ def _load_plugin_config() -> dict:
 # MemoryProvider implementation
 # ---------------------------------------------------------------------------
 
+# The serving layer's XML->JSON tool-call converter sometimes fails to terminate
+# the LAST `<parameter=...>` value at its `</parameter>`, and runs on through
+# `</function></tool_call>` into whatever the model emitted next. Hermes receives
+# well-formed JSON whose envelope is correct — right tool name, other arguments
+# intact — with one string field carrying the tail. Observed 7 times between
+# 2026-07-06 and 2026-08-30 across TWO different local models
+# (genesis35-mtp-cron and qwen36-27b-cron), so it is the parser, not the model,
+# and swapping models does not avoid it. Rare (~0.015% of calls) but it costs a
+# whole call each time: on 2026-08-30 it ate BOTH of consolidate-synthesize's
+# `action=reason` entity-pair calls, which is the one step that lane needs.
+#
+# The intended value is always the text before the first tag, so recovering it is
+# exact. Anchored on the literal closing tags rather than a bare "<" because a
+# fact body may legitimately contain angle brackets (`|lambda|>1`, `<=2 samples`);
+# `</function>` and `</tool_call>` cannot occur in real prose here. Logged at
+# WARNING with the field name so a silent repair is still greppable in agent.log.
+_TOOL_TAG_TAIL = re.compile(r"</(?:parameter|function|tool_call)>|<tool_call>|<function=")
+
+
+def _strip_tool_call_tail(args: dict) -> None:
+    """Repair string arguments polluted by a mis-terminated tool-call parse."""
+    for key, val in list(args.items()):
+        if not isinstance(val, str):
+            continue
+        m = _TOOL_TAG_TAIL.search(val)
+        if not m:
+            continue
+        cleaned = val[: m.start()].rstrip().rstrip(">").rstrip()
+        logger.warning(
+            "fact_store: repaired tool-call tail in argument %r (%d chars -> %d); "
+            "the serving layer did not terminate the parameter value",
+            key, len(val), len(cleaned),
+        )
+        args[key] = cleaned
+
+
 class HolographicMemoryProvider(MemoryProvider):
     """Holographic memory with structured facts, entity resolution, and HRR retrieval."""
 
@@ -404,6 +440,7 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def _handle_fact_store(self, args: dict) -> str:
         try:
+            _strip_tool_call_tail(args)
             action = args["action"]
             store = self._store
             retriever = self._retriever
