@@ -70,11 +70,27 @@ FACT_STORE_SCHEMA = {
             # here only misleads. The previous four-value enum went stale as
             # soon as callers invented categories, which is immediately —
             # leaving the schema declaring most stored rows invalid.
+            # NAME THE ACTIONS. Every sibling here says which actions it serves
+            # ("required for 'add'", "for 'get'/'update'/'remove'", "Trust
+            # adjustment for 'update'") and until 2026-08-29 this one said none,
+            # while "defaults to 'general'" made it read as insert-time only. A
+            # cron run concluded from exactly that — correctly, on the text —
+            # that 'update' takes no category, left three answered questions in
+            # the open-question/hypothesis queue with the verdict written into
+            # their bodies, and stored the misreading as a fact that reached the
+            # morning briefing as a priority item. The comment below already
+            # concedes the flat property bag cannot express this in JSON Schema,
+            # "so that contract lived only in prose" — this was the one
+            # parameter whose prose was never written.
             "category": {
                 "type": "string",
                 "description": (
-                    "Free-form label; defaults to 'general'. Common: paper, "
-                    "researched, activity, lesson, project, synthesis, "
+                    "Free-form label. For 'add': the new fact's category, "
+                    "defaults to 'general'. For 'update': CHANGES the category "
+                    "— this is how an answered open-question or a confirmed "
+                    "hypothesis leaves its queue and becomes 'researched'; a "
+                    "verdict prefix in the body does NOT move it. Common: "
+                    "paper, researched, activity, lesson, project, synthesis, "
                     "hypothesis, open-question, user_pref, tool."
                 ),
             },
