@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS fact_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fact_history_fact ON fact_history(fact_id);
+
+CREATE TABLE IF NOT EXISTS fact_markers (
+    fact_id INTEGER NOT NULL,
+    marker  TEXT NOT NULL,
+    set_by  TEXT DEFAULT '',
+    set_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (fact_id, marker)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_markers_marker ON fact_markers(marker);
 """
 
 # Trust adjustment constants
@@ -145,6 +155,101 @@ _NEAR_DUP_WINDOW_DAYS = 30
 # so Jaccard stops resolving. Only 10 of 880 stored facts are this short (p05
 # is 32 tokens, median 95); they forgo the guard rather than risk it.
 _NEAR_DUP_MIN_TOKENS = 20
+
+# --- cross-job completion markers (see _reconcile_markers) ----------------
+# `tags` is written with `tags = ?` — a FULL SQL REPLACE. That is correct for
+# descriptive tags (a fact's subjects change when its content does), and it is
+# catastrophic for the handful of tags that are not descriptions at all but
+# CROSS-JOB COMPLETION STATE: one cron job writes the tag, a DIFFERENT job (or
+# its prerun digest script) reads it to decide whether to act at all. Twenty-one
+# nightly jobs share one tags column, four of them retype the whole string from
+# memory, and three have provably destroyed another job's marker:
+#
+#   fid 919  lost `promote-candidate` AND `promoted` (daily-trace-mining,
+#            2026-08-26 and 2026-08-27 — visible as two successive shrinking
+#            tag strings in fact_history)
+#   fid 685  lost `promote-candidate` the same way
+#   fid 1268 lost `deep-dived` fifteen hours after topic-deep-dive wrote it,
+#            to research-open-questions' answer rewrite
+#            (`dream,unverified,…,deep-dived` -> `researched,answered,…,verified`)
+#
+# After three nightly dives only 2 facts store-wide still carried `deep-dived`.
+# Each incident was patched in the losing job's PROMPT ("call action=get first
+# and copy the tags"); prompt discipline is not an invariant, and at 21 jobs it
+# will not hold. fact_markers is the invariant: markers live in their own table,
+# and update_fact RE-APPLIES any marker the caller's string omitted, so a full
+# replace becomes safe without changing a single caller.
+#
+# MEMBERSHIP TEST — a tag belongs here only if some job READS it to gate an
+# action, not merely to describe. Verified against the live store 2026-08-30 by
+# grepping every prompt in cron/jobs.json and every prerun script in scripts/:
+#
+#   promote-candidate  daily-review / weekly-trace-mining / retrieval-audit set
+#                      it; dream-and-promote selects on it.
+#   promoted           dream-and-promote sets it, and reads it on later nights
+#                      (and in its 2026-08-30 reconcile step) to avoid
+#                      re-promoting the same source fact.
+#   deep-dived         topic-deep-dive sets it on its synthesis fact;
+#                      scripts/deep-dive-topic.py DONE_TAGS excludes it.
+#   deep-dive          the same script's OTHER done tag — the variant written on
+#                      the SOURCE fact. Protecting only `deep-dived` would leave
+#                      the exclusion half-working, so both are markers.
+#   designed           experiment-design sets it; experiment-design-queue.py
+#                      TERMINAL and deep-dive-topic.py TERMINAL_TAGS read it.
+#   retired-experiment experiment-design sets it and its own prompt calls it
+#                      PERMANENT; three prerun scripts read it.
+#   experiment-run     declared in TERMINAL/TERMINAL_TAGS by both prerun
+#                      scripts. Zero rows carry it today; it is listed so the
+#                      FIRST write of it is protected rather than the second.
+#   needs-experiment   research-open-questions sets it; three prerun scripts
+#                      build their queues from it.
+#   blocked-local      research-open-questions sets it; morning-briefing drops
+#                      it from "actionable", experiment-design-queue.py skips it.
+#   deep-review-sent   deep-review-prep sets it; deep-review-candidates.py
+#                      SENT_TAG reads it "so they are never re-proposed".
+#   deep-review-filed  the ingest half of that pair (deep-review-file.py).
+#   retrieval-fail     retrieval-audit sets it, and its digest re-lists on it a
+#                      week later — retrieval_count cannot hold that state
+#                      because any read bumps the counter.
+#
+# DELIBERATELY NOT MARKERS. `research-queue`, `answered`, `verified`,
+# `unverified`, `confirmed`, `partially-confirmed`, `researched`, `synthesized`,
+# `open-question`, `memory-entry`, `highlight` are verdict or descriptive labels: they
+# describe what a fact IS, they are rewritten as part of a legitimate state
+# transition, and making them sticky would fight curation instead of protecting
+# it. `attempted-once`/`stalled` are the closest call — research-open-questions
+# does read them to pick its escalation path — but they are single-job aging
+# counters with 1 and 0 live rows; they are left out until a loss is observed,
+# and adding them is a one-line change here.
+CROSS_JOB_MARKERS = frozenset({
+    "promote-candidate",
+    "promoted",
+    "deep-dived",
+    "deep-dive",
+    "designed",
+    "retired-experiment",
+    "experiment-run",
+    "needs-experiment",
+    "blocked-local",
+    "deep-review-sent",
+    "deep-review-filed",
+    "retrieval-fail",
+})
+
+
+def _split_tags(raw: "str | None") -> list[str]:
+    """Split a tags field into stripped, non-empty tags, order preserved.
+
+    Whitespace only — no other normalisation. Five rows in the live store hold
+    JSON-array-shaped tags (`["paper", "GRACE", …]`, fids 816/817) and five use
+    `", "` separators; neither shape contains a marker, and rewriting them here
+    would silently reformat corpus rows on an unrelated write. Duplicates are
+    NOT collapsed either: fid 685 carries `promote-candidate` twice after a
+    manual restore, and deduplicating it as a side effect of some other job's
+    update is exactly the kind of uninvited edit this module exists to stop.
+    """
+    return [t for t in (part.strip() for part in (raw or "").split(",")) if t]
+
 
 # Categories remove_fact() refuses without force=True. These are the durable
 # lanes — a paper read, a lesson learned, a stated user preference — that an
@@ -454,6 +559,12 @@ class MemoryStore:
                 entity_id = self._resolve_entity(name)
                 self._link_fact_entity(fact_id, entity_id)
 
+            # Markers a fact is born with — topic-deep-dive writes
+            # tags="deep-dived,…" on the synthesis fact at ADD time, so
+            # registering only on update would leave its very first marker
+            # unprotected until something happened to touch the row.
+            self._record_markers(fact_id, tags, source_session)
+
             # Compute HRR vector after entity linking
             self._compute_hrr_vector(fact_id, content)
             self._rebuild_bank(category)
@@ -734,6 +845,14 @@ class MemoryStore:
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
 
+            # A tags write is a full replace; re-apply this fact's markers
+            # before it lands, and record any the caller introduced. Returns
+            # the caller's own string byte-for-byte when there is nothing to
+            # restore, so a fact with no markers is unaffected.
+            marker_inserts: list[tuple[int, str, str]] = []
+            if tags is not None:
+                tags = self._reconcile_markers(fact_id, tags, changed_by, marker_inserts)
+
             if content is not None:
                 assignments.append("content = ?")
                 params.append(content.strip())
@@ -755,6 +874,15 @@ class MemoryStore:
                     f"UPDATE facts SET {', '.join(assignments)} WHERE fact_id = ?",
                     params,
                 )
+                # Same transaction as the UPDATE: a marker recorded for a write
+                # that then failed (UNIQUE(content), say) would claim state the
+                # rendered tags do not show — the two must not diverge.
+                for row_args in marker_inserts:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO fact_markers (fact_id, marker, set_by)"
+                        " VALUES (?, ?, ?)",
+                        row_args,
+                    )
 
             # Re-derive entity links and the HRR vector when the text they
             # encode changed. The content-change path drops every existing
@@ -789,6 +917,214 @@ class MemoryStore:
                 self._rebuild_bank(old_cat)
 
             return True
+
+    # ------------------------------------------------------------------
+    # Cross-job completion markers
+    # ------------------------------------------------------------------
+    # fact_markers is the source of truth; facts.tags is a RENDERED VIEW of it.
+    # Keeping the rendering means every existing reader — the four prerun
+    # digest scripts that match `tags LIKE '%needs-experiment%'`, the FTS index,
+    # every prompt that tells a model to read a fact's tags — keeps working
+    # unchanged. See the CROSS_JOB_MARKERS comment for why this table exists.
+
+    def _markers_of(self, fact_id: int) -> set[str]:
+        rows = self._conn.execute(
+            "SELECT marker FROM fact_markers WHERE fact_id = ?", (fact_id,)
+        ).fetchall()
+        return {str(r["marker"]) for r in rows}
+
+    def _record_markers(self, fact_id: int, tags: str, set_by: str = "") -> None:
+        """Register any CROSS_JOB_MARKERS present in *tags*.
+
+        The write path stays the tags string, deliberately: every cron prompt
+        already says `tags="<existing>,promoted"`, and requiring them all to
+        learn a new call is the same prompt-discipline bet that failed three
+        times. A marker the caller ADDS is simply recorded.
+
+        Never raises. Losing the fact write to a bookkeeping failure would be
+        strictly worse than the missed marker (same contract as
+        _demote_superseded).
+        """
+        try:
+            for tag in _split_tags(tags):
+                if tag in CROSS_JOB_MARKERS:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO fact_markers (fact_id, marker, set_by)"
+                        " VALUES (?, ?, ?)",
+                        (fact_id, tag, set_by or ""),
+                    )
+        except Exception:                                    # pragma: no cover
+            logger.warning("marker registration failed for fid %s", fact_id,
+                           exc_info=True)
+
+    def _reconcile_markers(
+        self,
+        fact_id: int,
+        tags: str,
+        changed_by: str,
+        out_inserts: list,
+    ) -> str:
+        """Return *tags* with this fact's missing markers re-appended.
+
+        THE PROTECTION. A job that retypes the tag string from memory, or
+        rewrites it wholesale as part of a state transition, cannot destroy
+        another job's completion marker: whatever it omits is put back.
+
+        RE-APPLY IS UNCONDITIONAL — it does not try to tell a "retype" from a
+        "curation". That heuristic was considered and rejected on the evidence:
+        fid 1268's loss came from research-open-questions turning an answered
+        question's tags from `dream,unverified,…` into `researched,answered,…`,
+        which is a genuine, correct curation by every signal a heuristic could
+        read — and it still had no business dropping topic-deep-dive's
+        `deep-dived`. A guess that is wrong loses the marker silently, which is
+        the bug. So the rule is flat: the tags string cannot retire a marker.
+
+        HOW A MARKER IS RETIRED: clear_marker(). It deletes the fact_markers row
+        FIRST and only then rewrites tags, so there is nothing left for this
+        method to re-apply — removal is always reachable, in one call, in any
+        order. (`promoted` after an incumbent review demotes the MEMORY.md
+        entry, and `deep-dived` when a topic is re-opened, are the real cases.)
+
+        Returns the caller's string UNCHANGED — byte for byte, no reordering,
+        no dedup, no whitespace normalisation — whenever nothing is missing.
+        A store with an empty fact_markers therefore behaves exactly as it did
+        before this table existed, which is also the pre-backfill state.
+
+        Never raises: on any failure the caller's string is used as-is, i.e.
+        today's behaviour. A tags write must not be lost to this.
+        """
+        try:
+            present = {t for t in _split_tags(tags) if t in CROSS_JOB_MARKERS}
+            stored = self._markers_of(fact_id)
+
+            for marker in sorted(present - stored):
+                out_inserts.append((fact_id, marker, changed_by or ""))
+
+            missing = sorted(stored - present)
+            if not missing:
+                return tags
+
+            # WARNING, not debug: this is a job trying to delete state it does
+            # not own. It has to be greppable in agent.log — a marker silently
+            # restored every night means a prompt is still wrong even though
+            # the damage is now contained.
+            logger.warning(
+                "fact_markers: re-applied %s to fid %s — the tags write from "
+                "%r omitted them (full-replace protection)",
+                ",".join(missing), fact_id, changed_by or "<unknown session>",
+            )
+            base = tags.rstrip()
+            if base.endswith(","):
+                base = base[:-1].rstrip()
+            return (base + "," if base else "") + ",".join(missing)
+        except Exception:                                    # pragma: no cover
+            logger.warning("marker reconciliation failed for fid %s", fact_id,
+                           exc_info=True)
+            return tags
+
+    def get_markers(self, fact_id: int) -> list[str]:
+        """Every cross-job marker this fact carries, sorted. [] if none."""
+        with self._lock:
+            return sorted(self._markers_of(fact_id))
+
+    def set_marker(self, fact_id: int, marker: str, set_by: str = "") -> bool:
+        """Record *marker* on a fact and render it into the fact's tags.
+
+        The explicit form of what `tags="<existing>,promoted"` already does —
+        for new callers, and for anything that has no reason to hold the whole
+        tag string. Returns False if the fact does not exist.
+
+        A marker outside CROSS_JOB_MARKERS is refused rather than quietly
+        stored: an unrecognised name would be recorded here, re-applied
+        forever, and read by nothing.
+        """
+        marker = (marker or "").strip()
+        if marker not in CROSS_JOB_MARKERS:
+            raise ValueError(
+                f"{marker!r} is not a cross-job marker; add it to "
+                f"CROSS_JOB_MARKERS (with the job that reads it) first"
+            )
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tags FROM facts WHERE fact_id = ?", (fact_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            self._conn.execute(
+                "INSERT OR IGNORE INTO fact_markers (fact_id, marker, set_by)"
+                " VALUES (?, ?, ?)",
+                (fact_id, marker, set_by or ""),
+            )
+            self._conn.commit()
+            # Render. Routed through update_fact so the tags change is
+            # snapshotted into fact_history and the tag-derived entity links
+            # are refreshed, exactly as a caller-written tags string would be.
+            current = row["tags"] or ""
+            if marker not in _split_tags(current):
+                joined = f"{current},{marker}" if current.strip() else marker
+                self.update_fact(
+                    fact_id, tags=joined,
+                    changed_by=set_by or f"set_marker:{marker}",
+                )
+            return True
+
+    def clear_marker(self, fact_id: int, marker: str, changed_by: str = "") -> bool:
+        """Retire *marker*: delete the row, then strip it from the tags.
+
+        The ONLY way a marker comes off, since _reconcile_markers restores
+        anything a tags write omits. Order is load-bearing — the fact_markers
+        row goes first, so the rewrite below finds nothing to re-apply and
+        removal cannot deadlock against the protection. Doing it the other way
+        round (rewrite, then delete) would also work; doing only the rewrite
+        would not, which is precisely the point.
+
+        Returns True if the fact carried the marker in either place.
+        """
+        marker = (marker or "").strip()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tags FROM facts WHERE fact_id = ?", (fact_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            cur = self._conn.execute(
+                "DELETE FROM fact_markers WHERE fact_id = ? AND marker = ?",
+                (fact_id, marker),
+            )
+            self._conn.commit()
+            had_row = cur.rowcount > 0
+
+            parts = _split_tags(row["tags"])
+            if marker in parts:
+                self.update_fact(
+                    fact_id, tags=",".join(t for t in parts if t != marker),
+                    changed_by=changed_by or f"clear_marker:{marker}",
+                )
+                return True
+            return had_row
+
+    def facts_with_marker(self, marker: str, limit: int = 200) -> list[dict]:
+        """Facts carrying *marker*, oldest first, from fact_markers.
+
+        Reads the source-of-truth table, not `tags LIKE '%…%'`: a substring
+        match over a shared tag vocabulary is wrong in both directions — it
+        cannot tell `deep-dive` from `deep-dived`, and `needs-experiment` from
+        `retired-experiment` (scripts/deep-dive-topic.py carries that scar in a
+        comment). Returns [] before the backfill has run; the prerun scripts
+        keep using tags until they are migrated, which is why the rendering
+        exists.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,"
+                "       f.retrieval_count, f.helpful_count, f.created_at,"
+                "       f.updated_at, m.set_by, m.set_at"
+                "  FROM fact_markers m JOIN facts f USING (fact_id)"
+                " WHERE m.marker = ?"
+                " ORDER BY f.fact_id ASC LIMIT ?",
+                (marker, limit),
+            ).fetchall()
+            return [self._row_to_dict(r) for r in rows]
 
     def get_fact(self, fact_id: int) -> dict | None:
         """Fetch one fact by id, or None if it does not exist.
@@ -833,6 +1169,14 @@ class MemoryStore:
                 self._snapshot_fact(fact_id, "delete", changed_by)
                 self._conn.execute(
                     "DELETE FROM fact_entities WHERE fact_id = ?", (fact_id,)
+                )
+                # Markers go with the row. fact_id is AUTOINCREMENT so an id is
+                # never reused and orphans could not be mis-attributed, but a
+                # marker outliving its fact would still be counted by
+                # facts_with_marker(); the snapshot in fact_history carries the
+                # tags string, so this is not the last copy.
+                self._conn.execute(
+                    "DELETE FROM fact_markers WHERE fact_id = ?", (fact_id,)
                 )
                 self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
             self._rebuild_bank(row["category"])
