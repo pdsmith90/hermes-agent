@@ -58,7 +58,7 @@ jobs:
   # by both route matrices, so the two routes cover the same set.
   pick-releases:
     name: Pick release tags
-    # FORK GUARD (pdsmith90/hermes-agent-pds). This workflow answers "can a user
+    # FORK GUARD (pdsmith90/hermes-agent). This workflow answers "can a user
     # on a released version update to this commit?" — it samples the repo's
     # RELEASE TAGS via scripts/sandbox/pick-release-tags.sh. This fork publishes
     # no releases and has 0 tags (upstream has 54), so the picker exits non-zero

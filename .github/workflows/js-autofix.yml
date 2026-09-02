@@ -57,7 +57,7 @@ concurrency:
 jobs:
   generate-patch:
     name: Generate eslint --fix patch
-    # FORK GUARD (pdsmith90/hermes-agent-pds). This bot computes an
+    # FORK GUARD (pdsmith90/hermes-agent). This bot computes an
     # `eslint --fix` patch on one commit and pushes it back on the next job.
     # That assumes a PR-review cadence where the branch sits still between the
     # two. On this fork main is pushed to directly and often several times in a
