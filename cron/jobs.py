@@ -3406,6 +3406,37 @@ def _heartbeat_fire_claim_locked(job_id: str, *, expected_owner: str) -> bool:
     return False
 
 
+def _due_dispatch_order_key(
+    job: Dict[str, Any],
+    fallback: datetime,
+) -> Tuple[int, datetime]:
+    """Sort key placing a due job at its scheduled instant.
+
+    Used to return the due set in scheduled order (see the sort at the end of
+    ``_get_due_jobs_locked``), which becomes execution order whenever a
+    catch-up backlog is serialised onto the scheduler's single-worker pool.
+
+    Compares parsed instants, never the ISO strings: ``next_run_at`` can carry
+    mixed UTC offsets across a timezone change (see the offset-migration repair
+    in the due scan), and lexical order on those is wrong.
+
+    A record whose timestamp is missing or unparseable is unplaceable, so it
+    lands in a second bucket that sorts after every placeable record and ties
+    with its fellows — ``list.sort`` being stable, those keep their relative
+    file order.  A malformed record can therefore never jump the queue ahead of
+    a well-formed one.  ``fallback`` fills the tuple's second slot for that
+    bucket; it is never compared against a placeable record's timestamp because
+    the bucket differs first.
+    """
+    raw_next = job.get("next_run_at")
+    if isinstance(raw_next, str):
+        try:
+            return (0, _ensure_aware(datetime.fromisoformat(raw_next)))
+        except (ValueError, TypeError, OSError):
+            pass
+    return (1, fallback)
+
+
 def get_due_jobs() -> List[Dict[str, Any]]:
     """Get all jobs that are due to run now.
 
@@ -3948,6 +3979,25 @@ def _get_due_jobs_locked() -> List[Dict[str, Any]]:
 
     if needs_save:
         save_jobs(raw_jobs, removed_ids=intentionally_removed or None)
+
+    # Return due jobs in SCHEDULED order rather than jobs.json file order.
+    #
+    # On a healthy tick this is a no-op — one job comes due at a time, so there
+    # is nothing to reorder.  It matters only on a catch-up tick, when many
+    # jobs come due at once: the gateway was down, the host was asleep or in
+    # gaming-mode, or a long overrun backed the night up.  With
+    # ``cron.max_parallel_jobs: 1`` the scheduler serialises the whole due set
+    # onto a single-worker pool, so the order of this list IS execution order,
+    # and file order is arbitrary — a 03:50 job ahead of a 03:15 one in
+    # jobs.json would run first, inverting the intended night sequence.
+    #
+    # Sorting the RETURNED records is correct precisely because they are
+    # deepcopies (see ``jobs = [... copy.deepcopy(raw_jobs)]`` at the top of
+    # this scan): the past-grace fast-forward writes ``rj["next_run_at"]`` on
+    # the raw record only, never on ``job``, so each returned record still
+    # carries its ORIGINAL overdue timestamp — exactly the scheduled instant we
+    # want to order by, not the provisional next occurrence.
+    due.sort(key=lambda j: _due_dispatch_order_key(j, now))
 
     return due
 
