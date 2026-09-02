@@ -138,6 +138,15 @@ def _make_hermes_provider_class() -> Optional[type]:
             **kwargs: Any,
         ):
             super().__init__(*args, **kwargs)
+            # mcp 2.0.0 uses a task-owned anyio.Lock and holds it across the
+            # yielded resource request.  A session-long GET therefore blocks
+            # every concurrent POST, and HTTPX may later close the auth-flow
+            # generator from a different task than the lock owner.  A binary
+            # semaphore preserves mutual exclusion without task ownership;
+            # async_auth_flow below narrows its scope around resource I/O.
+            import anyio
+
+            self.context.lock = anyio.Semaphore(1, max_value=1)
             self._hermes_server_name = server_name
             self._hermes_home = ""
             # When the client_id comes from config.yaml (pre-registered), an
@@ -531,10 +540,43 @@ def _make_hermes_provider_class() -> Optional[type]:
             # contract. Regression from PR #11383 caught by
             # tests/tools/test_mcp_oauth_bidirectional.py.
             inner = super().async_auth_flow(request)
+            resource_lock_released = False
+            sent_access_token = None
+            retry_after_concurrent_auth = False
             try:
                 outgoing = await inner.__anext__()
                 while True:
+                    # The SDK holds context.lock for its entire generator,
+                    # including while HTTPX waits on the actual MCP request.
+                    # Release it only for that request.  OAuth discovery,
+                    # refresh, registration, and token exchange remain
+                    # serialized exactly as the SDK implements them.
+                    if outgoing is request:
+                        tokens = self.context.current_tokens
+                        sent_access_token = (
+                            tokens.access_token if tokens is not None else None
+                        )
+                        self.context.lock.release()
+                        resource_lock_released = True
                     incoming = yield outgoing
+                    if resource_lock_released:
+                        await self.context.lock.acquire()
+                        resource_lock_released = False
+                    # A different request may have completed refresh or full
+                    # authorization while this resource request was in
+                    # flight.  Retry with that token instead of starting a
+                    # duplicate OAuth transition from the stale 401/403.
+                    tokens = self.context.current_tokens
+                    if (
+                        getattr(incoming, "status_code", None) in (401, 403)
+                        and self.context.is_token_valid()
+                        and tokens is not None
+                        and tokens.access_token != sent_access_token
+                    ):
+                        self._add_auth_header(request)
+                        await inner.aclose()
+                        retry_after_concurrent_auth = True
+                        break
                     # Sniff the response for a dead-client-registration signal
                     # before handing it back to the SDK (best-effort, GH#36767).
                     await self._maybe_flag_poisoned_client(incoming)
@@ -545,6 +587,23 @@ def _make_hermes_provider_class() -> Optional[type]:
                 self._persist_oauth_metadata_if_changed()
                 return
             finally:
+                if resource_lock_released:
+                    # Balance the SDK's surrounding ``async with`` even when
+                    # HTTPX cancels or closes the flow while the resource
+                    # request is still in flight.  Shield only this local
+                    # bookkeeping.
+                    #
+                    # MUST precede the aclose() below: that finalization runs
+                    # the SDK generator's own ``async with self.context.lock``
+                    # exit, which releases. With the lock still released here
+                    # that exit would push a Semaphore(1, max_value=1) past its
+                    # max and raise. Re-acquire first, let the generator's exit
+                    # do the matching release.
+                    import anyio
+
+                    with anyio.CancelScope(shield=True):
+                        await self.context.lock.acquire()
+
                 # Close the inner generator HERE, in the task that opened it.
                 # The SDK holds ``async with self.context.lock`` across its
                 # yields (oauth2.py:493), so an inner generator left suspended
@@ -557,7 +616,16 @@ def _make_hermes_provider_class() -> Optional[type]:
                 # case: it took out `consensus` on every cron run of
                 # 2026-08-27 (60s connect timeout reported as CancelledError).
                 # aclose() on an already-exhausted generator is a no-op.
+                #
+                # Upstream's own note calls this teardown "the separate concern
+                # tracked by the cleanup PR" — it is still unfixed upstream, so
+                # this fork patch stays until that PR lands.
                 await inner.aclose()
+
+            if retry_after_concurrent_auth:
+                yield request
+                self._persist_oauth_metadata_if_changed()
+                return
 
     return HermesMCPOAuthProvider
 

@@ -290,6 +290,30 @@ _ANTHROPIC_SUPPORTED_MEDIA_TYPES = frozenset(
 )
 
 
+def _supported_media_types() -> frozenset:
+    """Formats the ACTIVE main model's server can decode.
+
+    Cloud providers take everything in _ANTHROPIC_SUPPORTED_MEDIA_TYPES.
+    The managed llama-server decodes with stb_image — no WebP — and an
+    undecodable image part fails SILENTLY (no error; the model never sees
+    an image and confabulates). Narrow the set so normalization converts
+    those formats to PNG before they enter the request or history."""
+    try:
+        from agent.auxiliary_client import _runtime_main_value
+        from hermes_cli.local_runtime.capabilities import (
+            ACCEPTED_IMAGE_MIMES,
+            is_managed_provider,
+        )
+
+        if is_managed_provider(
+                str(_runtime_main_value("provider") or ""),
+                str(_runtime_main_value("base_url") or "")):
+            return ACCEPTED_IMAGE_MIMES
+    except Exception:  # noqa: BLE001 — best-effort narrowing only
+        pass
+    return _ANTHROPIC_SUPPORTED_MEDIA_TYPES
+
+
 def _rasterize_svg_to_png(svg_path: Path, out_path: Path) -> bool:
     """Best-effort SVG → PNG rasterization. Returns True on success.
 
@@ -353,7 +377,7 @@ def _normalize_to_supported_image(
     the image is base64-embedded into conversation history, so an unsupported
     media_type can never reach the provider and wedge the session.
     """
-    if detected_mime in _ANTHROPIC_SUPPORTED_MEDIA_TYPES:
+    if detected_mime in _supported_media_types():
         return image_path, detected_mime, None
 
     out_dir = get_hermes_dir("cache/vision", "temp_vision_images")
@@ -1807,15 +1831,16 @@ from tools.registry import registry, tool_error
 
 VISION_ANALYZE_SCHEMA = {
     "name": "vision_analyze",
+    # Dieted (#95681): routing mechanics (native attach vs aux-model text
+    # fallback) removed — the route is automatic and the native path's own
+    # tool result says "you can see it natively now"; the schema doesn't
+    # need to predict plumbing. Region keeps its flow teaching: it's
+    # pre-effect guidance (a model that doesn't know crops keep full
+    # resolution never zooms).
     "description": (
-        "Load an image into the conversation so you can see it. Accepts a "
-        "URL, local file path, or data URL. When your active model has "
-        "native vision, the image is attached to your context directly "
-        "and you read the pixels yourself on the next turn — call this "
-        "any time the user references an image (filepath in their message, "
-        "URL in tool output, screenshot from the browser, etc.). For "
-        "non-vision models, falls back to an auxiliary vision model that "
-        "returns a text description."
+        "Load an image into the conversation so you can see it. Call it "
+        "any time the user references an image — then answer from what "
+        "you see."
     ),
     "parameters": {
         "type": "object",
@@ -1826,7 +1851,7 @@ VISION_ANALYZE_SCHEMA = {
             },
             "question": {
                 "type": "string",
-                "description": "Your specific question or request about the image. Optional context the model uses on the next turn after seeing the image."
+                "description": "Your question or request about the image."
             },
             "region": {
                 "type": "array",
@@ -1834,12 +1859,11 @@ VISION_ANALYZE_SCHEMA = {
                 "minItems": 4,
                 "maxItems": 4,
                 "description": (
-                    "Optional [x1, y1, x2, y2] crop region in pixel coordinates "
-                    "of the ORIGINAL image, applied before any downscaling so "
-                    "the region keeps full resolution. Intended flow: load the "
-                    "full image first, then call again with a region to zoom "
-                    "into a detail (small text, UI element, fine print). "
-                    "Coordinates are clamped to the image bounds."
+                    "Optional [x1, y1, x2, y2] crop in ORIGINAL-image pixel "
+                    "coordinates, applied before any downscaling — the crop "
+                    "keeps full resolution. Load the full image first, then "
+                    "re-call with a region to zoom into small text or fine "
+                    "detail."
                 )
             }
         },
