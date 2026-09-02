@@ -204,6 +204,40 @@ def _validate_action_args(action, args):
     return " ".join(parts)
 
 
+def _content_wipe_refusal(existing: dict, args: dict):
+    """Return an error string when an update's ``content`` would destroy a body.
+
+    ``content`` is a full-replacement field, and twice a model has fed it
+    something that was never a body: 2026-08-10 (three ANSWERED facts rewritten
+    into one-liners taken from 60-char digest previews) and 2026-09-02 (a
+    lifecycle tag word — experiment-design wiped fids 882/901 to
+    "retired-experiment"/"designed" while correctly setting tags and trust in
+    the same call, against a prompt that said not to touch content; the bodies
+    only survived as fact_history snapshots). Prompt prose failed both times;
+    like the ``remove_fact`` protected-category refusal, the invariant lives
+    here instead.
+    """
+    new = (args.get("content") or "").strip()
+    old = existing.get("content") or ""
+    tag_pool = f"{existing.get('tags') or ''},{args.get('tags') or ''}"
+    if new in {t.strip() for t in tag_pool.split(",") if t.strip()}:
+        return (
+            f"fact_store action='update' refused: content={new!r} is one of "
+            f"this fact's tags, and content REPLACES the whole {len(old)}-char "
+            f"body. To set lifecycle tags, re-issue the update with tags= (the "
+            f"full comma-separated list) and NO content field — the body then "
+            f"stays intact. Only pass content when rewriting the body in full."
+        )
+    if len(old) > 200 and len(new) < 40:
+        return (
+            f"fact_store action='update' refused: content of {len(new)} chars "
+            f"would replace a {len(old)}-char body. Omit content to leave the "
+            f"body unchanged (tags/trust_delta/category still apply), or "
+            f"supply the complete replacement text."
+        )
+    return None
+
+
 FACT_FEEDBACK_SCHEMA = {
     "name": "fact_feedback",
     "description": (
@@ -510,8 +544,15 @@ class HolographicMemoryProvider(MemoryProvider):
                 return json.dumps({"found": True, "fact": fact})
 
             elif action == "update":
+                fid = int(args["fact_id"])
+                if args.get("content") is not None:
+                    existing = store.get_fact(fid)
+                    if existing is not None:
+                        refusal = _content_wipe_refusal(existing, args)
+                        if refusal:
+                            return tool_error(refusal)
                 updated = store.update_fact(
-                    int(args["fact_id"]),
+                    fid,
                     content=args.get("content"),
                     trust_delta=float(args["trust_delta"]) if "trust_delta" in args else None,
                     tags=args.get("tags"),
