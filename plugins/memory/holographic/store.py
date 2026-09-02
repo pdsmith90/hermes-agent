@@ -521,10 +521,9 @@ class MemoryStore:
             # a column with non-constant default"), so CURRENT_TIMESTAMP is not
             # available on this path. created_at is the right backfill value
             # anyway — a fact was valid from the moment it was written, and
-            # inventing "now" for 939 existing rows would date every one of
-            # them to whichever process happened to open the store first.
+            # inventing "now" for existing rows would date every one of them to
+            # whichever process happened to open the store first.
             self._conn.execute("ALTER TABLE facts ADD COLUMN valid_from TIMESTAMP")
-            self._backfill_valid_from()
         if "valid_until" not in columns:
             # NULL is the load-bearing value here (= still valid), so there is
             # nothing to backfill: invalidate_fact closes a window only when
@@ -532,6 +531,18 @@ class MemoryStore:
             # this column existed that pairing has to be recovered by an
             # operator pass over the corpus, not guessed at open time.
             self._conn.execute("ALTER TABLE facts ADD COLUMN valid_until TIMESTAMP")
+        # UNCONDITIONALLY, not only when the column was just added. Adding a
+        # column does not restart the processes already using this store, and
+        # they keep INSERTing through the module they imported at startup —
+        # which has no valid_from in its INSERT. Observed on 2026-09-02: the
+        # migration ran at 00:17 and three facts written at 00:48 through an
+        # MCP bridge started at 00:04 came back with valid_from NULL on an
+        # already-migrated store. The gateway that runs the nightly cron is the
+        # same shape of long-lived process, so "migrated once" is not the same
+        # as "the invariant holds". This makes NOT NULL an invariant the store
+        # re-establishes every time it is opened, rather than a property of one
+        # lucky moment.
+        self._backfill_valid_from()
         hist_columns = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(fact_history)").fetchall()
@@ -543,7 +554,17 @@ class MemoryStore:
         self._conn.commit()
 
     def _backfill_valid_from(self) -> None:
-        """Stamp valid_from = created_at on every row that predates the column.
+        """Stamp valid_from = created_at on every row that is missing it.
+
+        Two sources of NULL: rows written before the column existed, and rows
+        written after it existed by a process still holding the pre-column
+        module (see the call site). Both mean the same thing — "valid from when
+        it was created" — so both take the same repair.
+
+        Returns immediately when nothing is NULL, which is the normal case on
+        every open after the first. That probe is a short-circuiting scan with
+        no index behind it; on a 939-row store it is microseconds, and paying it
+        once per process start is what buys the invariant.
 
         This is the first migration that has had to WRITE every existing row,
         and facts_fts is an external-content FTS5 index: the facts_au trigger
@@ -561,6 +582,11 @@ class MemoryStore:
         the live 939-row store the UPDATE succeeds in 0.15 s and no rebuild
         happens.
         """
+        probe = self._conn.execute(
+            "SELECT 1 FROM facts WHERE valid_from IS NULL LIMIT 1"
+        ).fetchone()
+        if probe is None:
+            return
         try:
             self._conn.execute(
                 "UPDATE facts SET valid_from = created_at WHERE valid_from IS NULL"

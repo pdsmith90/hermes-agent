@@ -73,6 +73,32 @@ class TestSchemaMigration:
         assert second.get_fact(fid) is not None
         second.close()
 
+    def test_a_row_written_by_a_stale_process_is_repaired_on_next_open(self, tmp_path):
+        """The invariant is re-established at open, not only at column-add.
+
+        Adding a column does not restart the processes already using the store.
+        On 2026-09-02 the migration ran at 00:17 and three facts written at
+        00:48 through an MCP bridge started at 00:04 came back with valid_from
+        NULL on an already-migrated store — the bridge was still INSERTing
+        through the module it imported at startup. The gateway that runs the
+        nightly cron is the same shape of process, so a backfill that only fires
+        when the column is missing would never have repaired them.
+        """
+        path = tmp_path / "memory_store.db"
+        first = MemoryStore(path)
+        fid = first.add_fact("LESSON: written by a process holding the old module.")
+        # Exactly what a pre-column INSERT leaves behind on a migrated store.
+        first._conn.execute("UPDATE facts SET valid_from = NULL WHERE fact_id = ?", (fid,))
+        first._conn.commit()
+        assert _window(first, fid)[1] is None
+        first.close()
+        MemoryStore._shared.clear()
+
+        reopened = MemoryStore(path)
+        created, valid_from, _ = _window(reopened, fid)
+        assert valid_from == created
+        reopened.close()
+
     def test_legacy_rows_are_backfilled_from_created_at(self, tmp_path):
         """A store written before this column existed must not come back NULL.
 
