@@ -252,15 +252,30 @@ async def _build_provider(tmp_path):
 
 @pytest.mark.asyncio
 async def test_early_close_releases_sdk_auth_lock(tmp_path, monkeypatch):
-    """Closing the wrapper mid-flow MUST release the SDK's ``context.lock``.
+    """Closing the wrapper mid-flow MUST NOT leak the SDK's ``context.lock``.
 
     The SDK holds ``async with self.context.lock`` across its ``yield``s
-    (oauth2.py:493). httpx closes an auth_flow that never ran to completion,
+    (oauth2.py:582). httpx closes an auth_flow that never ran to completion,
     which raises GeneratorExit at the wrapper's ``yield outgoing``. If the
     wrapper does not close the inner generator in its own task, the inner one
-    is finalized later by the GC on a *different* task and anyio's
-    ``Lock.release()`` raises "The current task is not holding this lock" —
-    leaving the lock held for the life of the process.
+    is finalized later by the GC on a *different* task, the release raises,
+    and the lock stays held for the life of the process.
+
+    ADAPTED at the 2026-09-02 upstream sync (upstream 9a1eef7a29, "narrow MCP
+    OAuth lock scope").  Two things changed underneath this test:
+
+    * ``context.lock`` is now ``anyio.Semaphore(1, max_value=1)``, not a
+      ``Lock``, so there is no ``.locked()`` — hold state reads off ``.value``
+      (0 held, 1 free).
+    * The lock is deliberately RELEASED around resource I/O, so it is free
+      while suspended at the resource yield.  The old precondition asserting
+      it was held there is now false BY DESIGN and has been dropped rather
+      than "fixed" — re-adding it would pin behaviour upstream removed.
+
+    What still matters, and is what this test now pins, is the invariant the
+    fork patch exists for: however the flow is torn down, the lock must come
+    back free.  ``test_flow_after_early_close_does_not_deadlock`` covers the
+    same guarantee from the symptom side.
     """
     import httpx
 
@@ -270,15 +285,15 @@ async def test_early_close_releases_sdk_auth_lock(tmp_path, monkeypatch):
     reset_manager_for_tests()
     provider = await _build_provider(tmp_path)
 
+    lock = provider.context.lock
+    assert lock.value == lock.max_value, "precondition: lock starts free"
+
     flow = provider.async_auth_flow(httpx.Request("POST", "https://example.com/mcp"))
     await flow.__anext__()
-    assert provider.context.lock.locked(), (
-        "precondition: the SDK holds context.lock while suspended at its yield"
-    )
 
     await flow.aclose()
 
-    assert not provider.context.lock.locked(), (
+    assert lock.value == lock.max_value, (
         "closing the wrapper must unwind the inner generator's `async with "
         "self.context.lock`; a leaked lock deadlocks every later auth flow"
     )
