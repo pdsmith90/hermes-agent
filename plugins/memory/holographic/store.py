@@ -30,7 +30,9 @@ CREATE TABLE IF NOT EXISTS facts (
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     hrr_vector      BLOB,
-    source_session  TEXT DEFAULT ''
+    source_session  TEXT DEFAULT '',
+    valid_from      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    valid_until     TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -139,6 +141,31 @@ _SUPERSESSION_RE = re.compile(
 # three mentions should not drive a row to zero. 0.30 keeps it at the default
 # search floor — still reachable, ranked below anything that corrected it.
 _SUPERSESSION_FLOOR = 0.30
+
+# --- fact validity windows (see invalidate_fact) --------------------------
+# Demotion answers "which of these two do I rank first". It cannot answer "was
+# this true on August 12", because a demoted fact is only ranked lower, never
+# marked invalid, and the retraction itself lives in free-text prose that
+# nothing but a human reader parses. `valid_from`/`valid_until` make the
+# supersession relation a QUERYABLE interval instead: every fact is born valid
+# at its own created_at, and the fact that retracts it closes the window at the
+# RETRACTING fact's created_at, so successive versions of one claim tile the
+# timeline as half-open intervals [valid_from, valid_until) that abut exactly
+# and never overlap. Reading fid 1281 -> 1283 -> 1305 (three generations of one
+# verdict on this store) now yields three adjacent windows rather than three
+# rows at three trust scores.
+#
+# Deliberately NOT a second ranking signal. The read path is unchanged: search
+# still orders by relevance * trust * decay, which already handles recency, and
+# an expired fact stays reachable — it is the lineage of an answer, and hiding
+# it would repeat the mistake the trust floor exists to avoid. The window is
+# for the questions ranking cannot answer, and for the digest's consistency
+# check (an expired fact still sitting above the search floor is a demotion
+# that did not take).
+#
+# `valid_until` is closed by a fact id, never by a bare timestamp (see
+# invalidate_fact): a window that closed for no nameable reason is exactly the
+# unfalsifiable state this column exists to replace.
 
 # --- near-duplicate guard (see _near_duplicate) ---------------------------
 # Token-Jaccard at or above this against a same-category fact written in the
@@ -488,6 +515,23 @@ class MemoryStore:
             self._conn.execute("ALTER TABLE facts ADD COLUMN hrr_vector BLOB")
         if "source_session" not in columns:
             self._conn.execute("ALTER TABLE facts ADD COLUMN source_session TEXT DEFAULT ''")
+        if "valid_from" not in columns:
+            # No DEFAULT clause here, unlike the fresh-schema column above:
+            # SQLite rejects a non-constant default on ADD COLUMN ("Cannot add
+            # a column with non-constant default"), so CURRENT_TIMESTAMP is not
+            # available on this path. created_at is the right backfill value
+            # anyway — a fact was valid from the moment it was written, and
+            # inventing "now" for 939 existing rows would date every one of
+            # them to whichever process happened to open the store first.
+            self._conn.execute("ALTER TABLE facts ADD COLUMN valid_from TIMESTAMP")
+            self._backfill_valid_from()
+        if "valid_until" not in columns:
+            # NULL is the load-bearing value here (= still valid), so there is
+            # nothing to backfill: invalidate_fact closes a window only when
+            # given the fact that closed it, and for retractions written before
+            # this column existed that pairing has to be recovered by an
+            # operator pass over the corpus, not guessed at open time.
+            self._conn.execute("ALTER TABLE facts ADD COLUMN valid_until TIMESTAMP")
         hist_columns = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(fact_history)").fetchall()
@@ -497,6 +541,39 @@ class MemoryStore:
                 "ALTER TABLE fact_history ADD COLUMN changed_by_session TEXT DEFAULT ''"
             )
         self._conn.commit()
+
+    def _backfill_valid_from(self) -> None:
+        """Stamp valid_from = created_at on every row that predates the column.
+
+        This is the first migration that has had to WRITE every existing row,
+        and facts_fts is an external-content FTS5 index: the facts_au trigger
+        issues a `('delete', rowid, content, tags)` command for each row an
+        UPDATE touches, and FTS5 raises "database disk image is malformed" when
+        asked to delete an entry the index never held. Any row written before
+        facts_fts existed is exactly such a row — the pre-FTS legacy shape in
+        tests/plugins/memory/test_holographic_history.py is one — so the obvious
+        one-line UPDATE fails on precisely the oldest stores.
+
+        The index was already broken in that case: every future UPDATE to those
+        rows would have raised the same error, and they were invisible to
+        search. Rebuilding it is therefore a repair, not a side effect. It runs
+        only after the direct path has actually failed — measured on a copy of
+        the live 939-row store the UPDATE succeeds in 0.15 s and no rebuild
+        happens.
+        """
+        try:
+            self._conn.execute(
+                "UPDATE facts SET valid_from = created_at WHERE valid_from IS NULL"
+            )
+        except sqlite3.DatabaseError:
+            logger.warning(
+                "facts_fts holds no entry for at least one row of facts; "
+                "rebuilding the index so the valid_from backfill can proceed"
+            )
+            self._conn.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+            self._conn.execute(
+                "UPDATE facts SET valid_from = created_at WHERE valid_from IS NULL"
+            )
 
     # ------------------------------------------------------------------
     # Public API
@@ -538,8 +615,9 @@ class MemoryStore:
             try:
                 cur = self._conn.execute(
                     """
-                    INSERT INTO facts (content, category, tags, trust_score, source_session)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO facts (content, category, tags, trust_score,
+                                       source_session, valid_from)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                     (content, category, tags, self.default_trust, source_session or ""),
                 )
@@ -679,6 +757,20 @@ class MemoryStore:
             # slipping through) and must never cost the newer row its trust.
             if not 0 < target < fact_id:
                 continue
+            # Close the retracted fact's validity window BEFORE the trust loop,
+            # and OUTSIDE it. The loop breaks on its first iteration whenever
+            # the target already sits at the floor — the normal state for a
+            # fact retracted twice — so a stamp placed inside it would be
+            # skipped for exactly the rows with the most interesting history.
+            # Trust and validity are answering different questions here and
+            # must not share a control flow.
+            try:
+                self.invalidate_fact(target, superseded_by=fact_id)
+            except Exception:
+                logger.warning(
+                    "validity-window close failed for fid %s (retracted by %s)",
+                    target, fact_id, exc_info=True,
+                )
             try:
                 # Bounded: at most two steps of _UNHELPFUL_DELTA per retraction,
                 # so one write can never sink a row further than 0.50 -> 0.30.
@@ -703,6 +795,53 @@ class MemoryStore:
                     target, fact_id, exc_info=True,
                 )
         return demoted
+
+    def invalidate_fact(self, fact_id: int, superseded_by: int) -> bool:
+        """Close *fact_id*'s validity window at the moment *superseded_by* was written.
+
+        Returns True only when this call actually moved the column — a window
+        already closed, an unknown fact on either side, or a superseding id
+        that is not strictly newer all return False without writing.
+
+        FIRST CLOSE WINS. `valid_until` records when a claim STOPPED being the
+        current answer, and that is the first retraction, not the last: a fact
+        retracted again a month later did not become invalid twice. The
+        `valid_until IS NULL` predicate is the whole idempotence story, which is
+        also what makes the backfill script safe to re-run.
+
+        The close time is read from the superseding fact's own created_at rather
+        than from the clock, so the live path and the historical backfill
+        produce identical values and the two windows abut exactly:
+        older.valid_until == newer.valid_from (they are half-open, so the
+        endpoints touching is correct and not an overlap). Calling with a bare
+        timestamp is deliberately impossible — see the validity-window comment
+        at the top of this module.
+
+        No fact_history snapshot: the snapshot columns are content/category/
+        tags/trust_score, none of which move here, so the row it wrote would
+        assert a change it cannot show. The audit trail for a supersession
+        close is the two `feedback` snapshots _demote_superseded writes, each
+        stamped "retracted by fid N", plus the retracting fact's own prose.
+        """
+        if not 0 < fact_id < superseded_by:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE facts
+                   SET valid_until = (SELECT created_at FROM facts WHERE fact_id = :newer)
+                 WHERE fact_id = :older
+                   AND valid_until IS NULL
+                   AND EXISTS (SELECT 1 FROM facts WHERE fact_id = :newer)
+                """,
+                {"older": fact_id, "newer": superseded_by},
+            )
+            self._conn.commit()
+            if cur.rowcount:
+                logger.info(
+                    "fid %s validity window closed by fid %s", fact_id, superseded_by
+                )
+            return bool(cur.rowcount)
 
     def search_facts(
         self,
@@ -1136,7 +1275,8 @@ class MemoryStore:
         with self._lock:
             row = self._conn.execute(
                 "SELECT fact_id, content, category, tags, trust_score,"
-                " retrieval_count, helpful_count, created_at, updated_at"
+                " retrieval_count, helpful_count, created_at, updated_at,"
+                " valid_from, valid_until"
                 " FROM facts WHERE fact_id = ?",
                 (fact_id,),
             ).fetchone()
@@ -1205,7 +1345,8 @@ class MemoryStore:
 
             sql = f"""
                 SELECT fact_id, content, category, tags, trust_score,
-                       retrieval_count, helpful_count, created_at, updated_at
+                       retrieval_count, helpful_count, created_at, updated_at,
+                       valid_from, valid_until
                 FROM facts
                 WHERE trust_score >= ?
                   {category_clause}
