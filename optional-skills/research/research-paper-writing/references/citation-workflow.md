@@ -53,9 +53,17 @@ Research has documented significant issues with AI-generated citations:
 | **arXiv** | Preprints | 3-second delays | ML preprints, PDF access |
 | **OpenAlex** | 240M+ works | 100K credits/day, 10 RPS | Open alternative to MAG |
 
-OpenAlex requires an API key on every request (since 2026-02-13): append
-`&api_key=$OPENALEX_API_KEY` (the key is in the environment, loaded from
-`~/.hermes/.env`) alongside the usual `mailto=` param.
+OpenAlex: pass the key as a **header**, never as an `&api_key=` query param —
+`curl -H "api_key: <value of the OPENALEX API key env var>" '...&mailto=...'`. Both forms
+are honoured identically, but a URL carrying the key rides into logs and stored request
+traces inside httpx/requests exception text, and no secret-pattern rule matches a bare
+alphanumeric OpenAlex key by shape. Set the header PER CALL, never on a shared
+`requests.Session` — those sessions also talk to publishers, and a session-level header
+would hand the key to every one of them.
+
+The key is OPTIONAL, not required: an unkeyed request returns 200 with
+`x-ratelimit-limit: 1000`; the key raises that to 10000/day. A missing key degrades
+throughput, it does not break access.
 
 ### API Selection Guide
 
