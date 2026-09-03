@@ -46,9 +46,18 @@ export HERMES_RERANK_URL=http://localhost:18000/v1/rerank
 |-----|---------|-------------|
 | `rerank_url` | `$HERMES_RERANK_URL`, else empty | Rerank endpoint. Empty = disabled |
 | `rerank_model` | `qwen3-rerank` | `model` field sent in the request |
-| `rerank_timeout` | `5.0` | Per-request timeout, seconds |
+| `rerank_timeout` | `$HERMES_RERANK_TIMEOUT`, else `8.0` | Per-request timeout, seconds |
 
 Behaviour and constraints:
+
+- **Two timeouts, keep them ordered.** The agent-side prefetch budget
+  (`HERMES_MEMORY_PREFETCH_TIMEOUT`, default 8 s, `agent/memory_manager.py`)
+  caps the whole recall step; `rerank_timeout` caps just the rerank call
+  inside it. Keep the rerank timeout below the budget so a slow reranker
+  still falls back to the additive blend in time — with the two equal (the
+  old 8 s/8 s pairing) a cold-started reranker cost the turn its recall
+  outright. A gateway serving cron can afford larger values than an
+  interactive session; set both in its systemd drop-in.
 
 - **Fails open.** Any error, timeout, or malformed response falls back to the
   additive blend. `search()` is on the hot path for every turn's prefetch and

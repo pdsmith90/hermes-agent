@@ -26,6 +26,21 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _env_float(name: str, default: float) -> float:
+    """Positive float from the environment, or *default* when unset or unusable."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        logger.warning("%s=%r is not a positive number; using %.1f", name, raw, default)
+        return default
+    return value
+
+
 class FactRetriever:
     """Multi-strategy fact retrieval with trust-weighted scoring."""
 
@@ -39,7 +54,7 @@ class FactRetriever:
         hrr_dim: int = 1024,
         rerank_url: str = "",
         rerank_model: str = "qwen3-rerank",
-        rerank_timeout: float = 8.0,
+        rerank_timeout: float | None = None,
         rerank_max_query_chars: int = 1500,
         rerank_max_doc_chars: int = 3000,
     ):
@@ -53,7 +68,15 @@ class FactRetriever:
         # fts/jaccard/hrr blend below is used unchanged.
         self.rerank_url = rerank_url or os.environ.get("HERMES_RERANK_URL", "")
         self.rerank_model = rerank_model
-        self.rerank_timeout = rerank_timeout
+        # 8 s suits an interactive turn. The gateway's cron lane instead pays a
+        # 3-8 s reranker cold start on each job's first turn (llama-swap
+        # idle-unloads qwen3-rerank between jobs) and was losing that turn's
+        # recall to this limit, so its unit sets HERMES_RERANK_TIMEOUT higher.
+        self.rerank_timeout = (
+            float(rerank_timeout)
+            if rerank_timeout is not None
+            else _env_float("HERMES_RERANK_TIMEOUT", 8.0)
+        )
         # A reranker server has a hard per-sequence cap (llama.cpp RANK pooling
         # cannot split a sequence across ubatches). The QUERY is the term that
         # actually overruns it: prefetch() passes the caller's whole turn text,

@@ -121,7 +121,7 @@ def test_tags_only_lifecycle_update_still_works(provider):
             "tags": "verified,needs-experiment,designed",
         },
     )
-    assert out == {"updated": True}
+    assert out["updated"] is True
     fact = _call(provider, {"action": "get", "fact_id": fid})["fact"]
     assert fact["content"] == LONG_BODY
     assert "designed" in fact["tags"]
@@ -133,7 +133,7 @@ def test_full_rewrite_still_works(provider):
     out = _call(
         provider, {"action": "update", "fact_id": fid, "content": new_body}
     )
-    assert out == {"updated": True}
+    assert out["updated"] is True
     assert _body(provider, fid) == new_body
 
 
@@ -143,5 +143,5 @@ def test_short_fact_short_content_still_works(provider):
     out = _call(
         provider, {"action": "update", "fact_id": fid, "content": "tool note: use ty"}
     )
-    assert out == {"updated": True}
+    assert out["updated"] is True
     assert _body(provider, fid) == "tool note: use ty"

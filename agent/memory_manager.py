@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import inspect
 import threading
@@ -79,6 +80,32 @@ logger = logging.getLogger(__name__)
 # running past this window dies with the interpreter.
 _SYNC_DRAIN_TIMEOUT_S = 5.0
 _EXTERNAL_PREFETCH_TIMEOUT_S = 8.0
+
+
+def _env_prefetch_timeout() -> float:
+    """Prefetch budget: HERMES_MEMORY_PREFETCH_TIMEOUT seconds, else the default.
+
+    The 8 s default suits an interactive turn, where a person is waiting. The
+    gateway's cron lane has nobody waiting and pays a 3-8 s reranker cold
+    start on every job's first turn (llama-swap idle-unloads the reranker
+    between jobs), so from 2026-08-30 it lost that turn's recall to this
+    budget about three times a night. The gateway unit raises it through its
+    systemd drop-in; an unparseable or non-positive value keeps the default.
+    """
+    raw = os.environ.get("HERMES_MEMORY_PREFETCH_TIMEOUT", "").strip()
+    if not raw:
+        return _EXTERNAL_PREFETCH_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        logger.warning(
+            "HERMES_MEMORY_PREFETCH_TIMEOUT=%r is not a positive number; using %.1fs",
+            raw, _EXTERNAL_PREFETCH_TIMEOUT_S,
+        )
+        return _EXTERNAL_PREFETCH_TIMEOUT_S
+    return value
 
 
 def normalize_tool_schema(schema: Any) -> Optional[Dict[str, Any]]:
@@ -449,7 +476,7 @@ class MemoryManager:
         self._tool_to_provider: Dict[str, MemoryProvider] = {}
         self._has_external: bool = False  # True once a non-builtin provider is added
         self._external_prefetch_timeout = (
-            _EXTERNAL_PREFETCH_TIMEOUT_S
+            _env_prefetch_timeout()
             if external_prefetch_timeout is None
             else float(external_prefetch_timeout)
         )

@@ -238,6 +238,44 @@ def _content_wipe_refusal(existing: dict, args: dict):
     return None
 
 
+def _update_result(fid: int, updated: bool, before: dict, after: dict) -> dict:
+    """Build the action='update' result so a no-op is visible to the caller.
+
+    ``update_fact`` changes only the fields passed and returns True whenever
+    the row exists, so ``{"updated": true}`` used to come back for a call that
+    changed nothing. On 2026-09-03 consolidate-synthesize re-sent one such
+    call eight times: it meant to strip stale queue tags from fid 1056 but
+    never passed ``tags``, and nothing in the result said the tags were
+    untouched. Now the result lists the fields that differ before/after,
+    echoes the row's current category, tags and trust, and names an empty
+    diff as the no-op it is.
+    """
+    changed = [
+        k for k in ("content", "category", "tags")
+        if (before.get(k) or "") != (after.get(k) or "")
+    ]
+    old_trust = float(before.get("trust_score") or 0.0)
+    new_trust = float(after.get("trust_score") or 0.0)
+    if abs(old_trust - new_trust) > 1e-9:
+        changed.append("trust_score")
+    result = {
+        "updated": updated,
+        "fact_id": fid,
+        "changed": changed,
+        "category": after.get("category"),
+        "tags": after.get("tags"),
+        "trust_score": after.get("trust_score"),
+    }
+    if updated and not changed:
+        result["note"] = (
+            "no-op: nothing differed from the stored row. An update changes only "
+            "the fields you pass — to change tags, pass tags=<the complete "
+            "replacement list>; to change category, pass category=. Do not "
+            "re-send this call unchanged."
+        )
+    return result
+
+
 FACT_FEEDBACK_SCHEMA = {
     "name": "fact_feedback",
     "description": (
@@ -545,12 +583,13 @@ class HolographicMemoryProvider(MemoryProvider):
 
             elif action == "update":
                 fid = int(args["fact_id"])
+                before = store.get_fact(fid)
+                if before is None:
+                    return json.dumps({"updated": False, "fact_id": fid})
                 if args.get("content") is not None:
-                    existing = store.get_fact(fid)
-                    if existing is not None:
-                        refusal = _content_wipe_refusal(existing, args)
-                        if refusal:
-                            return tool_error(refusal)
+                    refusal = _content_wipe_refusal(before, args)
+                    if refusal:
+                        return tool_error(refusal)
                 updated = store.update_fact(
                     fid,
                     content=args.get("content"),
@@ -559,7 +598,8 @@ class HolographicMemoryProvider(MemoryProvider):
                     category=args.get("category"),
                     changed_by=getattr(self, "_session_id", "") or "",
                 )
-                return json.dumps({"updated": updated})
+                after = store.get_fact(fid) or before
+                return json.dumps(_update_result(fid, updated, before, after))
 
             elif action == "remove":
                 fid = int(args["fact_id"])
