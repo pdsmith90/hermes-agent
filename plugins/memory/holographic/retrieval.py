@@ -221,6 +221,22 @@ def _env_float(name: str, default: float) -> float:
 #     this set is zero
 #   * 6 of 10 unanswerable are flagged, including 4 of the 5 pure-absence ones
 #
+# SECOND SCOPE LIMIT, measured on the live store 2026-09-04 after activation:
+# ce depends on how SPECIFIC the query is, not only on what the store holds.
+# The same unanswerable question asked two ways, against the same corpus and
+# the same top hit (fid 1202):
+#
+#   "Is fail2ban (or anything like it) running on pdsrv, and what jail
+#    settings — bantime, findtime, maxretry — does it apply to SSH logins?"   0.023  -> abstains
+#   "Is fail2ban running on pdsrv and what are its jail settings"             0.164  -> does not
+#
+# A vague query is a loose target, so a merely-adjacent fact clears it. The
+# probe set is written in long, specific questions, so the floor is calibrated
+# on that distribution and UNDER-fires on short ones. It never over-fires from
+# this: brevity raises ce, it does not lower it, so the gate stays silent
+# rather than wrongly abstaining. Fixing it properly means calibrating per
+# query-length band; do that only if short-query abstention turns out to matter.
+#
 # Set HERMES_ABSTAIN_FLOOR=0 to disable the gate entirely.
 _ABSTAIN_FLOOR_DEFAULT = 0.107
 ABSTAIN_FLOOR = _env_float("HERMES_ABSTAIN_FLOOR", _ABSTAIN_FLOOR_DEFAULT)
