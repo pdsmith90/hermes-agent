@@ -638,3 +638,63 @@ class TestSupersededByPointer:
         r = FactRetriever(store, rerank_url="", dense_url="")
         rows = {f["fact_id"]: f for f in r.search("deploy rollback", min_trust=0.0)}
         assert rows[old]["superseded_by"] is not None
+
+
+class TestSupersessionOnTheUpdatePath:
+    """A retraction recorded by REWRITING a fact must close a window too.
+
+    Until 2026-09-04 `_demote_superseded` ran only from `add_fact`, so
+    `action=update` could append "corrects fid N" and change nothing but the
+    text. That is how fid 1467 kept an open validity window and a trust ABOVE
+    the fact that corrected it.
+    """
+
+    def test_update_that_adds_a_retraction_demotes_and_closes(self, store):
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        newer = store.add_fact("LESSON: the reranker runs on the GPU, measured.")
+        assert store.get_fact(old)["valid_until"] is None
+
+        store.update_fact(
+            newer,
+            content=f"LESSON: the reranker runs on the GPU — corrects fid {old}.",
+        )
+        row = store.get_fact(old)
+        assert row["superseded_by"] == newer
+        assert row["valid_until"] is not None
+        assert row["trust_score"] < 0.5
+
+    def test_a_later_edit_does_not_demote_twice(self, store):
+        """Idempotence is the whole reason `previous` exists.
+
+        Without it every subsequent edit carrying the same sentence — a tag
+        normalisation, a prefix fix — would land another -0.10 on a row that
+        already took its demotion.
+        """
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        newer = store.add_fact("LESSON: the reranker runs on the GPU, measured.")
+        body = f"LESSON: the reranker runs on the GPU — corrects fid {old}."
+        store.update_fact(newer, content=body)
+        after_first = store.get_fact(old)["trust_score"]
+
+        store.update_fact(newer, content=body + " Second edit, same claim.")
+        assert store.get_fact(old)["trust_score"] == after_first
+
+    def test_a_tags_only_update_never_touches_supersession(self, store):
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        newer = store.add_fact(
+            f"LESSON: the reranker runs on the GPU — corrects fid {old}."
+        )
+        before = store.get_fact(old)["trust_score"]
+        store.update_fact(newer, tags="rig,reranker")
+        assert store.get_fact(old)["trust_score"] == before
+
+    def test_the_passive_voice_still_does_nothing_here(self, store):
+        """`superseded by fid N` names the NEWER fact. Same rule on both paths."""
+        first = store.add_fact("LESSON: the reranker runs on the CPU.")
+        second = store.add_fact("LESSON: the reranker runs on the GPU.")
+        store.update_fact(
+            second,
+            content=f"LESSON: the reranker runs on the GPU (superseded by fid {first}).",
+        )
+        assert store.get_fact(first)["valid_until"] is None
+        assert store.get_fact(second)["valid_until"] is None

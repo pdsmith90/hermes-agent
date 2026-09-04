@@ -861,12 +861,15 @@ class MemoryStore:
             logger.debug("near-duplicate check failed", exc_info=True)
         return None
 
-    def _demote_superseded(self, fact_id: int, content: str) -> list[int]:
+    def _demote_superseded(
+        self, fact_id: int, content: str, previous: "str | None" = None
+    ) -> list[int]:
         """Demote any strictly-older fact this one explicitly retracts.
 
-        Called only on the genuine-insert path — the duplicate-content branch
+        Called from the genuine-insert path — the duplicate-content branch
         returns before this, so re-writing the same fact cannot demote its
-        target twice.
+        target twice — and from update_fact, which passes *previous* so that
+        only retractions the edit ADDED are acted on.
 
         Deliberately here rather than in the scheduler's per-run ledger: the
         ledger sees only what the nightly cron writes, while every writer on the
@@ -881,6 +884,9 @@ class MemoryStore:
         demoted: list[int] = []
         try:
             targets = {int(m) for m in _SUPERSESSION_RE.findall(content)}
+            if previous is not None:
+                # The update path: act only on retractions this edit ADDED.
+                targets -= {int(m) for m in _SUPERSESSION_RE.findall(previous)}
         except Exception:                                    # pragma: no cover
             return demoted
         for target in sorted(targets):
@@ -1115,11 +1121,13 @@ class MemoryStore:
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT fact_id, trust_score, category FROM facts WHERE fact_id = ?",
+                "SELECT fact_id, trust_score, category, content"
+                "  FROM facts WHERE fact_id = ?",
                 (fact_id,),
             ).fetchone()
             if row is None:
                 return False
+            prior_content = row["content"]
 
             embed_content: "str | None" = None
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
@@ -1207,6 +1215,23 @@ class MemoryStore:
         # Outside the lock — see the same call at the end of add_fact.
         if embed_content is not None:
             self._embed_fact(fact_id, embed_content)
+        # SUPERSESSION ON THE UPDATE PATH TOO (2026-09-04). Until now
+        # _demote_superseded ran only from add_fact, so a retraction recorded
+        # by REWRITING a fact could never close a validity window no matter how
+        # it was phrased. That is not a hypothetical: on 2026-09-04 the
+        # consolidate-synthesize job resolved a real contradiction by appending
+        # a correction to fid 1467 through action=update, and the row kept an
+        # open window and a trust ABOVE the fact that corrected it.
+        #
+        # ONLY NEWLY NAMED fids. Passing the whole content would re-fire on
+        # every later edit that happens to carry the same sentence — a tag
+        # normalisation, a prefix fix — and each re-fire is another -0.10 on a
+        # row that already took its demotion. Diffing against the pre-update
+        # text makes this idempotent for the same reason add_fact's
+        # duplicate-content branch is: the event is the APPEARANCE of the
+        # retraction, not its continued presence.
+        if content is not None and content != prior_content:
+            self._demote_superseded(fact_id, content, previous=prior_content)
         return True
 
     # ------------------------------------------------------------------
