@@ -249,6 +249,53 @@ def _content_wipe_refusal(existing: dict, args: dict):
     return None
 
 
+# Mirror of scripts/store-stats.py VERDICT_HEADER: what a body's LEADING header
+# says its category must be. "ANSWERED" and "RESEARCHED:" are deliberately absent
+# there too — forward-direction vocabulary; a leading "ANSWERED" is a filing choice.
+_VERDICT_HEADER = {
+    "OPEN QUESTION:": "open-question",
+    "HYPOTHESIS:": "hypothesis",
+    "CONFIRMED:": "researched",
+    "REFUTED:": "researched",
+    "PARTIALLY-CONFIRMED:": "researched",
+}
+
+
+def _verdict_category_refusal(existing: dict, args: dict):
+    """Refuse an update whose new body opens with a verdict/queue header that
+    contradicts the category the fact would be left in.
+
+    The prompts' CATEGORY HYGIENE rule — prefix and category move together in
+    the same update — has failed in prose repeatedly: research-open-questions on
+    2026-08-21 (fids 963/985/989) and 2026-08-29 (three facts), consolidate on
+    2026-09-04 (fids 886/896 rewritten to "REFUTED: ..." but left as lessons).
+    Each left a queue/answer hybrid that store-stats ALERTs on and someone
+    repaired by hand. Like the content-wipe guard above, the invariant now lives
+    here: an update that passes content is checked against the category it
+    would end up with (the category argument if given, else the stored one) and
+    refused with the exact re-issue shape. Tags-only and category-only updates
+    are untouched, so the prescribed repair — a category-only update — always
+    goes through.
+    """
+    new = (args.get("content") or "").lstrip()
+    if not new:
+        return None
+    effective = args.get("category") or existing.get("category") or ""
+    for prefix, expected in _VERDICT_HEADER.items():
+        if new.startswith(prefix):
+            if effective == expected:
+                return None
+            return (
+                f"fact_store action='update' refused: content starts with {prefix!r} "
+                f"but the fact would be left in category={effective!r}. A body with "
+                f"that header must live in category={expected!r} (CATEGORY HYGIENE) — "
+                f"anything else is the queue/answer hybrid store-stats alerts on. "
+                f"Re-issue the SAME call with category=\"{expected}\" added, or keep "
+                f"the stored prefix instead of rewriting it."
+            )
+    return None
+
+
 def _update_result(fid: int, updated: bool, before: dict, after: dict) -> dict:
     """Build the action='update' result so a no-op is visible to the caller.
 
@@ -611,7 +658,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 if before is None:
                     return json.dumps({"updated": False, "fact_id": fid})
                 if args.get("content") is not None:
-                    refusal = _content_wipe_refusal(before, args)
+                    refusal = _content_wipe_refusal(before, args) or _verdict_category_refusal(before, args)
                     if refusal:
                         return tool_error(refusal)
                 updated = store.update_fact(
