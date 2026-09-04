@@ -22,9 +22,11 @@ if TYPE_CHECKING:
 try:
     from . import holographic as hrr
     from . import embeddings
+    from . import entailment
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
     import embeddings  # type: ignore[no-redef]
+    import entailment  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +335,52 @@ def no_confident_match(meta: dict, floor: "float | None" = None) -> "dict | None
     if top >= f:
         return None
     return {"top_ce": round(top, 3), "floor": round(f, 3)}
+
+
+# The shape the entailment leg is allowed to run on. NOT a tuning knob — see
+# the measurement in entailment.py. Every false abstention the unrestricted rule
+# produced was a paraphrase probe, and four of the five questions the
+# cross-encoder misses are lexical-shaped, so this single restriction keeps 4/5
+# of the catches for 1/8 of the cost and halves the number of model calls.
+_ENTAIL_SHAPE = "lexical"
+
+
+def no_entailed_answer(
+    query: str,
+    results: "list[dict]",
+    meta: dict,
+    url: "str | None" = None,
+) -> "dict | None":
+    """The second abstention leg: the rows are on topic but do not answer it.
+
+    Composes with no_confident_match rather than replacing it. A door wanting
+    the full measured rule writes:
+
+        verdict = no_confident_match(meta) or no_entailed_answer(q, rows, meta)
+
+    which is exactly the "ce floor OR lexical-gated entailment" row of the
+    table in entailment.py: 9/10 unanswerable, 1/56 false abstentions.
+
+    Returns None — make no claim — in every situation except a model that
+    actually ran and actually said no. That covers the lane being switched off,
+    the query not being lexical-shaped, an empty result set, an unreachable or
+    slow model, and an unparseable reply. NOT running on the per-turn prefetch
+    path is the caller's job, and the reason this is a free function rather
+    than a step inside search(): a ~1.4 s model call must be something a door
+    opts into, not something every turn inherits.
+    """
+    if not results or meta.get("shape") != _ENTAIL_SHAPE:
+        return None
+    # The cross-encoder must have run. Without it the pool ordering came from
+    # the blend, so `results` is a different population from the one this was
+    # calibrated on, and its own floor already declines to speak.
+    if not meta.get("reranked"):
+        return None
+    answered = entailment.answers_question(query, results, url=url)
+    if answered is not False:          # True, or None for "no judgement"
+        return None
+    return {"reason": "entailment", "shape": meta.get("shape"),
+            "top_ce": round(float(meta.get("top_ce", 0.0)), 3)}
 
 
 class FactRetriever:

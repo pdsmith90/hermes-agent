@@ -26,7 +26,11 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 from utils import is_truthy_value
 from .store import MemoryStore
-from .retrieval import FactRetriever, no_confident_match
+from .retrieval import (
+    FactRetriever,
+    no_confident_match,
+    no_entailed_answer,
+)
 from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
@@ -63,7 +67,11 @@ FACT_STORE_SCHEMA = {
         "telling you it probably does not hold the answer. Treat it as a reason to "
         "say you do not know, or to look elsewhere, rather than as a reason to "
         "present the returned rows as the answer. Its absence is not a guarantee of "
-        "correctness; it only fires when the cross-encoder ran."
+        "correctness; it only fires when the cross-encoder ran. A verdict "
+        "carrying \"reason\": \"entailment\" is the stronger case: the rows ARE on "
+        "topic, and a second model was asked whether they answer the question and "
+        "said no. That is the signal for a question built on a premise the store "
+        "does not support."
     ),
     "parameters": {
         "type": "object",
@@ -604,7 +612,22 @@ class HolographicMemoryProvider(MemoryProvider):
                 # answer is a RESULT, not an error. The verdict comes from
                 # retrieval.no_confident_match so this door and the MCP bridge
                 # cannot drift apart; see ABSTAIN_FLOOR.
-                verdict = no_confident_match(meta)
+                #
+                # TWO LEGS, composed with `or` so the cheap one short-circuits
+                # the expensive one. no_confident_match reads a number already
+                # computed during the search; no_entailed_answer may make a
+                # ~1.4 s model call, and only for lexical-shaped queries whose
+                # cross-encoder score already cleared the floor. Measured over
+                # 66 probes the pair catches 9 of 10 unanswerable questions for
+                # one false abstention in 56, against 5 of 10 for the floor
+                # alone. The lane is off unless HERMES_ENTAIL_URL is set, so
+                # this costs exactly nothing until it is deployed.
+                #
+                # DELIBERATELY NOT IN prefetch(). That path runs on every turn
+                # and calls search() without with_meta, so it cannot reach
+                # either leg — keep it that way.
+                verdict = (no_confident_match(meta)
+                           or no_entailed_answer(args["query"], results, meta))
                 if verdict:
                     payload["no_confident_match"] = True
                     payload.update(verdict)
