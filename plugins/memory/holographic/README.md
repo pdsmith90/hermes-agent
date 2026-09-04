@@ -62,10 +62,11 @@ Behaviour and constraints:
 - **Fails open.** Any error, timeout, or malformed response falls back to the
   additive blend. `search()` is on the hot path for every turn's prefetch and
   every cron fact search, so a down reranker must not break retrieval.
-- **The candidate pool is not widened.** Only the existing `limit*3` FTS pool is
-  reordered. Measured against a live store, reranking that pool changed ~47% of
-  top-5 in ~520 ms; widening to `limit*6` changed the same ~47% but cost
-  ~1190 ms.
+- **The FTS pool is not widened for the reranker's sake.** Only the `limit*3`
+  FTS pool plus the dense candidates (below) are reordered. Measured against a
+  live store, reranking the FTS pool alone changed ~47% of top-5 in ~520 ms;
+  widening it to `limit*6` changed the same ~47% but cost ~1190 ms. The dense
+  lane widens the pool for a different reason — recall, not rank.
 - **Trust weighting is preserved** — the final score is
   `relevance_score * trust_score`, so a low-trust fact cannot win on relevance
   alone.
@@ -76,6 +77,54 @@ Verified against `llama-server --reranking` serving Qwen3-Reranker. Note that
 `--reranking` alone implies `--embedding` and `--pooling rank`, and that RANK
 pooling cannot split a sequence across ubatches — so `--ubatch-size` is a hard
 cap on `template + query + longest single document`, not on their sum.
+
+## Dense candidate lane (embeddings)
+
+Keyword search cannot retrieve a fact that shares no words with the question.
+Measured on a 939-fact store (2026-09-02), the FTS candidate pool held the
+gold fact for 100% of entity/lexical questions and 36% of paraphrased ones —
+and every stage above FTS, the reranker included, only reorders that pool.
+`search()` therefore also embeds the query and UNIONs the top-k facts by cosine
+into the pool before the blend and the rerank run. Brute force over the whole
+corpus (1000 × 1024 float32 is 4 MB and one matmul); no vector database.
+
+**Activation is the data, not a flag.** The lane is inert while the
+`fact_embeddings` table is empty — a fresh store, and every test store, makes
+no network call. Populating the table switches it on:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python ~/.hermes/scripts/memory-index-heal.py
+```
+
+After that `add_fact`/`update_fact` embed each new or rewritten fact
+themselves (outside the write lock; a failure leaves the row absent for the
+nightly heal, never fails the write). `DELETE FROM fact_embeddings` turns the
+lane off again and is also how you force a re-embed after a model swap —
+rows for a different `model` count as missing.
+
+| Knob | Default | Description |
+|------|---------|-------------|
+| `HERMES_EMBED_URL` | `http://127.0.0.1:18000/v1/embeddings` | Endpoint. **Empty is authoritative OFF** (unlike `HERMES_RERANK_URL`) |
+| `HERMES_EMBED_MODEL` | `jina-embed` | `model` field sent in the request; stored with each vector |
+| `HERMES_EMBED_TIMEOUT` | `8.0` | Per-request timeout; the gateway drop-in sets 15 for cold loads |
+| `HERMES_ABSTAIN_FLOOR` | calibrated constant | Cross-encoder floor below which search admits "no confident match" |
+
+The weighting is query-adaptive: a question carrying a quoted string, path,
+identifier, ALL-CAPS acronym or fid reference takes 8 dense candidates at a
+0.10 share of the blend; plain prose takes 24 at 0.50. See `_query_shape` in
+`retrieval.py` for the routing and its measured error asymmetry. Rung
+`+dense` of `scripts/memory-retrieval-eval.py` isolates the lane's effect.
+
+## Abstention
+
+`search(..., with_meta=True)` returns `(rows, meta)`; `meta["top_ce"]` is the
+raw cross-encoder score of the best row and `no_confident_match(meta)` is the
+verdict both retrieval doors render (a `NO-CONFIDENT-MATCH` line in the MCP
+bridge, sibling keys in the `fact_store` JSON). Rows are never filtered by it.
+The floor sits on the cross-encoder score and not on `score` because `score`
+multiplies relevance by trust and temporal decay — a correct 18-day-old answer
+measured 0.24 while a wrong 1-day-old one measured 0.73. Calibrate with
+`memory-retrieval-eval.py --stage abstention` against negative probes.
 
 ## Tools
 

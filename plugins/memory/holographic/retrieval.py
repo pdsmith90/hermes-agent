@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -20,10 +21,142 @@ if TYPE_CHECKING:
 
 try:
     from . import holographic as hrr
+    from . import embeddings
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
+    import embeddings  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
+
+# --- query-adaptive dense weighting --------------------------------------
+# The 2026-09-02 eval's finding was that the FTS candidate pool has recall 1.00
+# on entity/lexical/supersession probes and 0.36 on paraphrase ones. So the
+# dense lane must widen the pool on paraphrase-shaped questions WITHOUT feeding
+# the cross-encoder two dozen extra distractors on the questions keyword search
+# already answers perfectly — that is how you fix paraphrase and lose entity in
+# the same commit. fid 1385 (ANSWERED) says the same thing: union the two
+# candidate lists, and weight them ADAPTIVELY rather than at one static alpha.
+#
+# The routing is by query SHAPE, which is the cheapest signal that actually
+# separates the two regimes and needs no model: a question carrying a quoted
+# string, a path, an identifier, an ALL-CAPS acronym or a fid reference is one
+# whose answer shares literal tokens with the stored fact, and BM25 is already
+# at its ceiling there. Plain prose is where keyword search has nothing to
+# match on.
+#
+# TUNED 2026-09-04 against the 46-probe set on a backfilled snapshot of the
+# live store, comparing production-with-dense against production-without-dense
+# on the SAME corpus (the 09-02 baseline is not a valid control here — the store
+# grew 939 -> 1011 facts in between, and those 72 rows are distractors of their
+# own). k_lexical swept 8/4/2/0:
+#
+#   k_lex   entity h@5   lexical h@5   paraphrase h@5
+#     8        0.71         0.77           0.64
+#     4        0.71         0.85           0.64      <- the knee
+#     2        0.71         0.85           0.64
+#     0        0.79         0.85           0.57
+#   (no dense: 0.79         0.85           0.29)
+#
+# 8 was over-injecting: two extra dense rows displaced the gold answer of a
+# lexical probe out of the top 5 for nothing. 4 restores lexical to its
+# no-dense value exactly while keeping every paraphrase gain, and measures
+# identically to 2 while leaving more headroom for a prose question the shape
+# router sends down the lexical path anyway.
+#
+# k_lexical=0 — dense candidates ONLY for prose queries — is the one setting
+# that also restores entity h@5 to 0.79. It is not the default because that
+# 0.79 -> 0.71 is a SINGLE probe (p09) whose gold moved from rank 5 to rank 6
+# when the cross-encoder judged a dense candidate more relevant than four of
+# the five keyword hits; entity hit@8 is 0.79 at every k, so the fact is still
+# retrieved either way. Paying 0.07 of paraphrase recall to move one already-
+# retrieved fact up one rank is the wrong trade. Set k_lexical=0 if you want
+# the stricter no-regression guarantee.
+#
+# NOTE ON _DENSE_SHARE: it has NO effect while the cross-encoder is up, because
+# stage 3 rescores the entire pool and the blend only decides the pre-rerank
+# order. It matters solely on the reranker-down fallback path. Do not try to
+# tune retrieval quality with it — tune k.
+_DENSE_SHARE = {"lexical": 0.10, "semantic": 0.50}
+_DENSE_K = {"lexical": 4, "semantic": 24}
+
+# Token shapes that say "this query names something literally".
+#
+# NO APOSTROPHE RULE. An early version treated any ' as a quoted literal and
+# routed "Wasn't there a day when...", "the author's method" and "the server's
+# media folders" — three of the fourteen paraphrase probes — to the keyword
+# profile. Possessives and contractions are the most ordinary prose there is;
+# this is the same mistake the 2026-07-29 entity-extraction fix deleted an
+# apostrophe rule to undo. Double quotes stay: they are deliberate.
+#
+# ALL-CAPS is >=3 letters, not >=2, because "AI" appears in prose questions
+# while GPU / OOM / FTS5 / RAG name things. Measured over the 46-probe set,
+# that one change moved paraphrase routing from 8/14 to 13/14 correct.
+_LEXICAL_TOKEN_RE = re.compile(
+    r"""
+      \w*[_/\\]\w+                 # snake_case, a/path, a\path
+    | \w+\.\w+                     # file.py, module.attr, 0.6B
+    | [A-Za-z]+\d|\d+[A-Za-z]+     # gfx1201, Q8, 27b, v5
+    | \b[A-Z]{3,}\b                # FTS5, HRR, GPU, OOM
+    | \b[a-z]+[A-Z]\w*             # camelCase
+    | \b[A-Z][a-z]+[A-Z]\w*        # CamelCase / FactRetriever
+    """,
+    re.VERBOSE,
+)
+
+
+def _query_shape(query: str) -> str:
+    """"lexical" if the query names something literally, else "semantic".
+
+    THE ERRORS ARE NOT SYMMETRIC, and not in the direction that first looks
+    obvious. Routing a keyword question to the semantic profile widens a pool
+    whose recall is already 1.00 — the gold fact is still in it, and only its
+    RANK is at risk, which the cross-encoder gets a second say on. Routing a
+    paraphrase question to the keyword profile leaves it with dense_k=8 and a
+    0.10 share, i.e. leaves the 0.36 pool recall this whole track exists to fix
+    almost exactly where it was. Recall lost at candidate generation cannot be
+    won back downstream; rank can. So the tie goes to "semantic".
+
+    Calibrated against the 46-probe set (variant C of five tried): 13/14
+    paraphrase probes route semantic, and 25/32 of the rest route lexical. The
+    seven that do not are entity/lexical questions phrased in pure prose, which
+    is exactly the population the dense lane is harmless on.
+    """
+    if '"' in query:
+        return "lexical"
+    if re.search(r"\bfid[\s=:#]*\d", query, re.IGNORECASE):
+        return "lexical"
+    if _LEXICAL_TOKEN_RE.search(query):
+        return "lexical"
+    return "semantic"
+
+
+def _search_meta(
+    shape: str,
+    results: "list[dict]",
+    reranked: bool,
+    dense_raw: "dict[int, float]",
+    top_ce: float = 0.0,
+) -> dict:
+    """Per-QUERY confidence signals for the abstention gate (Track 2).
+
+    `reranked` is the load-bearing field. search() returns scores on two
+    different scales: the additive blend's `relevance * trust * decay`, and the
+    cross-encoder's `ce * (0.5 + 0.5*trust) * decay`, where ce saturates near
+    1.0 for anything on-topic. A floor calibrated on one is meaningless against
+    the other, so a caller must know which it got — and the honest behaviour
+    when the reranker was down is to make no confidence claim at all rather
+    than a miscalibrated one.
+    """
+    return {
+        "shape": shape,
+        "reranked": reranked,
+        "dense_candidates": len(dense_raw),
+        "n_results": len(results),
+        "top_score": float(results[0].get("score", 0.0)) if results else 0.0,
+        # The abstention floor goes HERE, not on top_score. See the _ce stash
+        # in search() for the measurement that settles it.
+        "top_ce": top_ce,
+    }
 
 
 def _env_float(name: str, default: float) -> float:
@@ -39,6 +172,83 @@ def _env_float(name: str, default: float) -> float:
         logger.warning("%s=%r is not a positive number; using %.1f", name, raw, default)
         return default
     return value
+
+
+# --- abstention (Track 2) -------------------------------------------------
+# Every 2026 memory benchmark punishes confident recall of nothing, and this
+# store had no way to say "I have nothing". It is not a filter: rows below the
+# floor are STILL RETURNED, and the caller decides. That is what separates this
+# from PROBE_FLOOR in the MCP bridge, which does drop rows.
+#
+# ONE constant, read by BOTH doors — the prose one in scripts/hermes_memory_mcp.py
+# and the JSON one in the fact_store tool. The bridge's existing PROBE_FLOOR is
+# the counter-example: a bridge-local number whose calibration survives only in a
+# comment, which drifts the moment one side is recalibrated.
+#
+# CALIBRATED 2026-09-04 by scripts/memory-retrieval-eval.py --stage abstention
+# over 54 answerable and 10 provably-unanswerable probes on a backfilled
+# snapshot. See that function for why the floor sits on the raw cross-encoder
+# score rather than on fact["score"]. Rerun it after any change to the probe
+# set, the reranker, or the embedding model.
+#
+# WHAT THIS FLOOR DETECTS, AND WHAT IT DOES NOT. The measured distribution is
+# bimodal in a way that matters:
+#
+#   unanswerable, "nothing like this is stored":  0.000 0.000 0.001 0.004
+#                                                 0.007 0.025
+#   unanswerable, FALSE PREMISE:                  0.893 0.949 0.982 0.982
+#   answerable:                                   0.007 0.023 | 0.189 … 1.000
+#
+# A cross-encoder scores "is this document about the same thing as this query",
+# not "does this document answer this query". A question whose premise is
+# invented but whose vocabulary is entirely real — "in our vLLM-versus-
+# llama-swap throughput comparison, how much faster was vLLM?", "what MMLU
+# score did qwen36-27b-cron get?" — is maximally on-topic by construction, and
+# a genuinely related fact scores 0.98 against it. No floor on this signal can
+# catch that class, and pretending otherwise would be worse than silence.
+# Detecting a fabricated premise needs entailment, not similarity.
+#
+# So the floor is set at the MAX-MARGIN point of the empty band between the
+# "nothing stored" cluster (top 0.025) and the answerable tail (bottom 0.189),
+# rather than at the Youden-J maximum. Youden picks 0.984 — it does catch all
+# ten negatives, but it also abstains on 43% of questions the store CAN answer,
+# which is a far more damaging error: the caller loses a real answer, while a
+# missed abstention still hands them the rows to judge. At 0.107:
+#
+#   * 96.3% of answerable questions pass (2 of 54 abstained)
+#   * both of those two are probes where retrieval genuinely FAILED to surface
+#     the gold fact — so the gate is right about them, and its true cost on
+#     this set is zero
+#   * 6 of 10 unanswerable are flagged, including 4 of the 5 pure-absence ones
+#
+# Set HERMES_ABSTAIN_FLOOR=0 to disable the gate entirely.
+_ABSTAIN_FLOOR_DEFAULT = 0.107
+ABSTAIN_FLOOR = _env_float("HERMES_ABSTAIN_FLOOR", _ABSTAIN_FLOOR_DEFAULT)
+
+
+def no_confident_match(meta: dict, floor: "float | None" = None) -> "dict | None":
+    """The abstention verdict for a search, or None to make no claim.
+
+    None means "say nothing", and it covers three distinct situations that all
+    warrant silence rather than a warning:
+
+      * no results at all — the doors already have their own wording for that;
+      * the cross-encoder did not run (down, timed out, or disabled), so the
+        only calibrated signal is missing. An uncalibrated warning is worse
+        than none: it would fire on the blend's numbers, which live on a
+        different scale entirely;
+      * a floor of 0, which is how the gate ships disabled before calibration.
+
+    A dict is returned ONLY when the store should admit it has no confident
+    answer, so a door can treat truthiness as the whole decision.
+    """
+    f = ABSTAIN_FLOOR if floor is None else float(floor)
+    if f <= 0 or not meta.get("n_results") or not meta.get("reranked"):
+        return None
+    top = float(meta.get("top_ce", 0.0))
+    if top >= f:
+        return None
+    return {"top_ce": round(top, 3), "floor": round(f, 3)}
 
 
 class FactRetriever:
@@ -57,10 +267,31 @@ class FactRetriever:
         rerank_timeout: float | None = None,
         rerank_max_query_chars: int = 1500,
         rerank_max_doc_chars: int = 3000,
+        dense_url: str | None = None,
+        dense_timeout: float | None = None,
     ):
         self.store = store
         self.half_life = temporal_decay_half_life
         self.hrr_dim = hrr_dim
+
+        # Dense candidate lane (2026-09-04). THREE-STATE, unlike rerank_url
+        # directly below: None = decide from the environment, "" = off, and a
+        # string = that endpoint. rerank_url's `or os.environ.get(...)` form
+        # cannot express "off" while the variable is exported, which is the trap
+        # the retrieval eval documents at length — every rung of its ablation
+        # silently became the production rung. The dense rung must be able to
+        # say no.
+        #
+        # Note what does NOT gate this: a config flag. The lane is inert until
+        # fact_embeddings has rows (see MemoryStore._embeddings_active), so a
+        # store that was never backfilled — every test's tmp_path store — never
+        # reaches the network no matter what this URL says.
+        self.dense_url = embeddings.resolve_url(dense_url)
+        self.dense_timeout = (
+            float(dense_timeout)
+            if dense_timeout is not None
+            else embeddings.resolve_timeout()
+        )
 
         # Optional cross-encoder rerank of the FTS candidate pool (see search()).
         # DISABLED unless a URL is supplied, either here or via HERMES_RERANK_URL.
@@ -102,10 +333,14 @@ class FactRetriever:
         category: str | None = None,
         min_trust: float = 0.3,
         limit: int = 10,
-    ) -> list[dict]:
-        """Hybrid search: FTS5 candidates → Jaccard rerank → trust weighting.
+        with_meta: bool = False,
+    ):
+        """Hybrid search: FTS5 ∪ dense candidates → blend → trust weighting.
 
         Pipeline:
+        0. Dense candidates (optional): embed the query once and take the top
+           _DENSE_K[shape] by cosine over the whole corpus, UNIONed with stage 1.
+           This is candidate GENERATION, not reranking — see the module header.
         1. FTS5 search: Get limit*3 candidates from SQLite full-text search
         2. Jaccard boost: Token overlap between query and fact content
         3. Trust weighting: final_score = relevance * trust_score
@@ -114,13 +349,58 @@ class FactRetriever:
            decay — same pool, reordered; the trust term is clamped there
            because the cross-encoder saturates. See stage 3 below.
 
-        Returns list of dicts with fact data + 'score' field, sorted by score desc.
+        Returns list of dicts with fact data + 'score' field, sorted by score
+        desc. With *with_meta*, returns (results, meta) instead — meta carries
+        the confidence signals the abstention gate needs (see the two retrieval
+        doors: scripts/hermes_memory_mcp.py and the fact_store tool). It is a
+        separate return shape rather than an extra key on every fact because
+        these are properties of the QUERY, not of any one row.
         """
+        shape = _query_shape(query)
+
         # Stage 1: Get FTS5 candidates (more than limit for reranking headroom)
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
 
+        # Stage 0: dense candidates, UNIONed in. An FTS row wins any collision
+        # because it is the one carrying fts_rank; the dense score is looked up
+        # by fact_id below and so survives the dedupe either way.
+        dense_raw: dict[int, float] = {}
+        if self.dense_url:
+            dense_rows, dense_raw = self._dense_candidates(
+                query, category, min_trust, _DENSE_K[shape]
+            )
+            if dense_rows:
+                seen = {int(f["fact_id"]) for f in candidates}
+                candidates = candidates + [
+                    f for f in dense_rows if int(f["fact_id"]) not in seen
+                ]
+
         if not candidates:
-            return []
+            return ([], _search_meta(shape, [], False, dense_raw, 0.0)) if with_meta else []
+
+        # Min-max, not the divide-by-max that _fts_candidates uses on BM25 rank.
+        # Cosines from a retrieval-tuned embedder occupy a narrow high band —
+        # measured 0.29 between two unrelated three-word strings, not 0.0 — so
+        # dividing by the max would leave the whole pool crammed into the top
+        # third of [0,1] and waste most of the dense term's dynamic range.
+        # Min-max also gives a candidate with no stored vector the right neutral
+        # value: 0.0, i.e. "as weak as the weakest thing the dense lane scored",
+        # rather than "infinitely bad". That state is transitional anyway — the
+        # nightly heal job exists to empty it.
+        dense_norm: dict[int, float] = {}
+        if dense_raw:
+            lo, hi = min(dense_raw.values()), max(dense_raw.values())
+            span = hi - lo
+            dense_norm = {
+                fid: ((val - lo) / span if span > 1e-9 else 1.0)
+                for fid, val in dense_raw.items()
+            }
+        # The dense TERM only enters the blend when the lane actually produced
+        # scores. Without this the weights would be silently rescaled by
+        # (1 - share) on every search that failed to embed, quietly changing
+        # ranking on the exact path that is supposed to degrade to the old one.
+        dense_share = _DENSE_SHARE[shape] if dense_norm else 0.0
+        blend_scale = 1.0 - dense_share
 
         # Stage 2: Rerank with Jaccard + trust + optional decay
         query_tokens = self._tokenize(query)
@@ -167,10 +447,18 @@ class FactRetriever:
             else:
                 hrr_sim = 0.5  # neutral
 
-            # Combine FTS5 + Jaccard + HRR
+            # Combine FTS5 + Jaccard + HRR, then give the dense term its share.
+            # The three tuned weights are SCALED rather than replaced, so their
+            # ratios — including an hrr_weight=0 ablation, and the numpy-absent
+            # 0.6/0.4 redistribution above — survive untouched, and
+            # dense_share=0 reproduces the pre-2026-09-04 score exactly.
             relevance = (self.fts_weight * fts_score
                         + self.jaccard_weight * jaccard
                         + self.hrr_weight * hrr_sim)
+            if dense_share:
+                relevance = blend_scale * relevance + dense_share * dense_norm.get(
+                    int(fact["fact_id"]), 0.0
+                )
 
             # Trust weighting
             score = relevance * fact["trust_score"]
@@ -194,15 +482,20 @@ class FactRetriever:
         # Sort by score descending, return top limit
         scored.sort(key=lambda x: x["score"], reverse=True)
 
-        # Stage 3 (optional): cross-encoder rerank of the SAME limit*3 pool.
-        # Measured against a live store: reranking the existing limit*3 pool
-        # changed ~47% of top-5 in ~520 ms, while widening to limit*6 gave the
-        # SAME ~47% at ~1190 ms — so the pool is deliberately NOT widened.
-        # The additive blend above still decides which limit*3 candidates get
-        # here; this only reorders them. Any failure returns None -> blend order.
+        # Stage 3 (optional): cross-encoder rerank of the SAME pool — the FTS
+        # limit*3 candidates plus whatever the dense lane unioned in. The FTS
+        # half is deliberately NOT widened for the reranker's benefit: measured
+        # against a live store, reranking limit*3 changed ~47% of top-5 in
+        # ~520 ms, while limit*6 gave the SAME ~47% at ~1190 ms. The dense
+        # rows are a different matter — they are there for RECALL (a fact the
+        # keyword index could not see at all), and the reranker is what lets
+        # them compete on relevance rather than on the blend's dense share.
+        # This stage only reorders; any failure returns None -> blend order.
+        reranked = False
         if self.rerank_url and len(scored) > 1:
             ce = self._rerank_scores(query, [f["content"] for f in scored])
             if ce is not None:
+                reranked = True
                 for fact, ce_score in zip(scored, ce):
                     # ce_score is already P(yes) in [0,1] (RANK pooling softmaxes
                     # in-graph for QWEN3). Trust weighting is preserved so a
@@ -232,14 +525,27 @@ class FactRetriever:
                         * (0.5 + 0.5 * fact["trust_score"])
                         * fact.get("_decay", 1.0)
                     )
+                    # Stashed for the abstention gate, and popped with _decay
+                    # below. THE SCORE ABOVE CANNOT BE USED AS A CONFIDENCE
+                    # SIGNAL: it multiplies relevance by two policy terms, and
+                    # measured on the live store 2026-09-04 they dominate it.
+                    # A correct answer at rank 0 scored 0.242 (ce 0.40, 18 days
+                    # old) while the top hit for a question the store provably
+                    # cannot answer scored 0.725 (ce 0.98, one day old) — the
+                    # ranking is right in both cases, but any floor that
+                    # abstains on the second also abstains on the first. ce is
+                    # the only term here that is a relevance judgement.
+                    fact["_ce"] = ce_score
                 scored.sort(key=lambda x: x["score"], reverse=True)
 
         results = scored[:limit]
         # Strip raw HRR bytes and the internal decay stash — callers expect
         # JSON-serializable dicts holding only store columns plus "score".
+        top_ce = float(results[0].get("_ce", 0.0)) if results else 0.0
         for fact in results:
             fact.pop("hrr_vector", None)
             fact.pop("_decay", None)
+            fact.pop("_ce", None)
         # Surfacing counts as retrieval: this path serves per-turn prefetch
         # injection and the fact_store search action, neither of which was
         # reflected in retrieval_count before.
@@ -247,7 +553,102 @@ class FactRetriever:
             self.store.mark_retrieved([f["fact_id"] for f in results])
         except Exception:
             logger.debug("mark_retrieved failed", exc_info=True)
+        if with_meta:
+            return results, _search_meta(shape, results, reranked, dense_raw, top_ce)
         return results
+
+    def _dense_candidates(
+        self,
+        query: str,
+        category: str | None,
+        min_trust: float,
+        k: int,
+    ) -> "tuple[list[dict], dict[int, float]]":
+        """Top-*k* facts by embedding cosine, plus the raw cosine of each.
+
+        ([], {}) on ANY failure — no vectors stored, no numpy, the embedding
+        endpoint down or slow. That is the whole latency guard: search() then
+        proceeds on FTS candidates alone, which is precisely how it behaved
+        before this lane existed. A dense lane that could raise would have put
+        an HTTP call between the user and every single turn's prefetch.
+
+        Brute force over the full corpus, deliberately (see
+        MemoryStore.embedding_matrix). The trust/category filter is applied to
+        the id set BEFORE the top-k cut, not after, or a category search would
+        return fewer than k rows whenever the global top-k happened to sit
+        outside it.
+        """
+        loaded = self.store.embedding_matrix()
+        if loaded is None:
+            return [], {}
+        ids, matrix = loaded
+        numpy = hrr._np()
+
+        vector = embeddings.embed_one(
+            query, url=self.dense_url, timeout=self.dense_timeout
+        )
+        if not vector:
+            return [], {}
+        q = numpy.asarray(vector, dtype=numpy.float32)
+        norm = float(numpy.linalg.norm(q))
+        if norm <= 0:
+            return [], {}
+        # Stored vectors are normalised on the way in (embeddings.to_blob), so
+        # normalising the query is all that is left to make this dot product a
+        # cosine.
+        sims = matrix @ (q / norm)
+
+        conn = self.store._conn
+        where = "trust_score >= ?"
+        params: list = [min_trust]
+        if category:
+            where += " AND category = ?"
+            params.append(category)
+        try:
+            allowed = {
+                int(r[0])
+                for r in conn.execute(
+                    f"SELECT fact_id FROM facts WHERE {where}", params
+                ).fetchall()
+            }
+        except Exception:
+            return [], {}
+        if not allowed:
+            return [], {}
+
+        mask = numpy.fromiter(
+            (int(fid) in allowed for fid in ids), dtype=bool, count=len(ids)
+        )
+        if not mask.any():
+            return [], {}
+        cand_ids = ids[mask]
+        cand_sims = sims[mask]
+        k = min(int(k), int(cand_ids.shape[0]))
+        top = numpy.argsort(-cand_sims)[:k]
+        chosen = [int(cand_ids[i]) for i in top]
+        raw = {int(cand_ids[i]): float(cand_sims[i]) for i in top}
+
+        placeholders = ",".join("?" * len(chosen))
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM facts WHERE fact_id IN ({placeholders})", chosen
+            ).fetchall()
+        except Exception:
+            return [], {}
+        by_id = {int(r["fact_id"]): dict(r) for r in rows}
+        # Preserve cosine order, and drop any id the SELECT could not resolve
+        # (a vector whose fact was deleted between the two statements).
+        out = []
+        for fid in chosen:
+            fact = by_id.get(fid)
+            if fact is None:
+                raw.pop(fid, None)
+                continue
+            # No fts_rank: this row did not come from the keyword index, and
+            # search() reads it with .get(..., 0.0). Inventing a rank here would
+            # give a dense-only hit a free BM25 score.
+            out.append(fact)
+        return out, raw
 
     def _rerank_scores(self, query: str, documents: list[str]) -> list[float] | None:
         """POST to a llama.cpp /v1/rerank endpoint. None on ANY failure.

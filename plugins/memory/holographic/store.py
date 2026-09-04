@@ -13,8 +13,10 @@ from pathlib import Path
 
 try:
     from . import holographic as hrr
+    from . import embeddings
 except ImportError:
     import holographic as hrr  # type: ignore[no-redef]
+    import embeddings  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +109,25 @@ CREATE TABLE IF NOT EXISTS fact_markers (
 );
 
 CREATE INDEX IF NOT EXISTS idx_fact_markers_marker ON fact_markers(marker);
+
+-- Dense retrieval vectors, one row per fact (2026-09-04). The FTS5 index and
+-- the HRR vector are both computed locally; this is the only stored artefact
+-- that comes from a model, so `model` and `dim` travel WITH the blob: a vector
+-- written by a different embedding model is not comparable to one written by
+-- this one, and a store that outlives a model swap has to be able to say which
+-- rows are stale rather than silently mixing two vector spaces.
+--
+-- Deliberately a separate table rather than a column on facts: it is optional
+-- (a store with none of these rows behaves exactly as it did before), it is
+-- refreshed on a different schedule from the row it describes, and a 4 KB blob
+-- on facts would be read by every SELECT f.* in the retrieval path.
+CREATE TABLE IF NOT EXISTS fact_embeddings (
+    fact_id    INTEGER PRIMARY KEY REFERENCES facts(fact_id),
+    model      TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    vector     BLOB NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # Trust adjustment constants
@@ -675,7 +696,20 @@ class MemoryStore:
 
             self._demote_superseded(fact_id, content)
 
-            return fact_id
+        # OUTSIDE the lock, and outside it deliberately. self._lock is the
+        # PROCESS-WIDE write lock every MemoryStore instance shares (see the
+        # registry comment on the class) — the main agent plus every
+        # delegate_task subagent. An HTTP call inside it stalls every other
+        # memory write in the gateway for as long as llama-swap takes, which on
+        # a cold load of jina-embed is seconds, not milliseconds.
+        #
+        # Placed after the lock rather than inside also means the two dedupe
+        # returns above (near-duplicate at the top, UNIQUE(content) in the
+        # except) skip it for free: a restatement never pays an embedding call.
+        # The row is already durable — the connection is in autocommit, so the
+        # INSERT committed the instant it ran and nothing here can un-write it.
+        self._embed_fact(fact_id, content)
+        return fact_id
 
     def _near_duplicate(self, content: str, category: str) -> int | None:
         """Return the fact_id this content merely restates, or None.
@@ -1007,6 +1041,7 @@ class MemoryStore:
             if row is None:
                 return False
 
+            embed_content: "str | None" = None
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
 
@@ -1071,6 +1106,14 @@ class MemoryStore:
                     self._link_fact_entity(fact_id, entity_id)
                 self._conn.commit()
                 self._compute_hrr_vector(fact_id, row2["content"])
+                # The dense vector encodes CONTENT only, so a tags-only edit
+                # leaves it correct — unlike the HRR vector above, which
+                # re-derives from entity links that tags CAN change. Deferred
+                # to after the lock for the same reason as in add_fact; read
+                # back from the row, not from the argument, so it matches what
+                # was actually stored.
+                if content is not None:
+                    embed_content = row2["content"]
             # Rebuild the destination bank — and the SOURCE bank too when the
             # fact changed category, or the departed bank goes on counting it.
             # remove_fact already rebuilds the category a fact leaves; a
@@ -1081,7 +1124,10 @@ class MemoryStore:
             if cat != old_cat:
                 self._rebuild_bank(old_cat)
 
-            return True
+        # Outside the lock — see the same call at the end of add_fact.
+        if embed_content is not None:
+            self._embed_fact(fact_id, embed_content)
+        return True
 
     # ------------------------------------------------------------------
     # Cross-job completion markers
@@ -1343,6 +1389,13 @@ class MemoryStore:
                 # tags string, so this is not the last copy.
                 self._conn.execute(
                     "DELETE FROM fact_markers WHERE fact_id = ?", (fact_id,)
+                )
+                # Same reasoning as fact_markers: fact_id is AUTOINCREMENT so a
+                # surviving vector could never be mis-attributed to a later
+                # fact, but it would go on being scored by the dense scan and
+                # returning a fact_id that JOINs to nothing.
+                self._conn.execute(
+                    "DELETE FROM fact_embeddings WHERE fact_id = ?", (fact_id,)
                 )
                 self._conn.execute("DELETE FROM facts WHERE fact_id = ?", (fact_id,))
             self._rebuild_bank(row["category"])
@@ -1652,6 +1705,314 @@ class MemoryStore:
                 (bank_name, hrr.phases_to_bytes(bank_vector), self.hrr_dim, fact_count),
             )
             self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Dense embedding lane
+    # ------------------------------------------------------------------
+    # ACTIVATION IS THE DATA, NOT A FLAG. Every method below is inert while
+    # fact_embeddings is empty, and populating it (scripts/backfill-fact-
+    # embeddings.py) is what switches the lane on. That is deliberate:
+    #
+    #   * a fresh checkout, and every test that builds a MemoryStore over a
+    #     tmp_path, has an empty table and therefore makes NO network call —
+    #     this class had never issued one before 2026-09-04 and a config-flag
+    #     design would have made "does add_fact touch the network?" depend on
+    #     which config file the test process happened to find;
+    #   * turning the lane on is a deliberate, auditable act (a backfill run)
+    #     rather than a line in a YAML file that `hermes config migrate` is
+    #     known to rewrite;
+    #   * turning it OFF is `DELETE FROM fact_embeddings`, which is also
+    #     exactly what you would do to force a re-embed after a model swap.
+
+    def _embeddings_active(self) -> bool:
+        """Is the dense lane switched on for this store?
+
+        The True result is cached forever — a lane cannot un-activate itself,
+        and re-probing on the hot write path for a fact we are about to embed
+        anyway is wasted work. A False result is NOT cached: the backfill that
+        activates the lane runs in a different process, and a long-lived
+        gateway must notice it without a restart.
+        """
+        # Both caches live on the shared registry entry, not on self: one
+        # gateway process holds a MemoryStore per provider (the main agent plus
+        # every delegate_task subagent) and they all point at one connection.
+        # Per-instance caches would mean N copies of the same 4 MB matrix and N
+        # independent activation probes.
+        if self._entry.get("embed_on"):
+            return True
+        if not embeddings.available():
+            return False
+        try:
+            row = self._conn.execute(
+                "SELECT 1 FROM fact_embeddings LIMIT 1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return False
+        if row is None:
+            return False
+        self._entry["embed_on"] = True
+        return True
+
+    def _embed_fact(self, fact_id: int, content: str) -> None:
+        """Write-path hook. Never raises, never blocks a fact from existing.
+
+        An embedding failure leaves the row absent, which is precisely the
+        state the nightly heal job looks for — the same self-heal shape as
+        hermes-numpy-ensure. The alternative, failing the write, would let a
+        cold llama-swap load cost the metabolism a fact.
+        """
+        if not self._embeddings_active():
+            return
+        try:
+            self.ensure_embedding(fact_id, content=content, force=True)
+        except Exception:
+            logger.debug("embedding write failed for fact %s", fact_id, exc_info=True)
+
+    def ensure_embedding(
+        self,
+        fact_id: int,
+        content: "str | None" = None,
+        force: bool = False,
+    ) -> bool:
+        """Compute and store this fact's dense vector. True if a row was written.
+
+        This is the ONLY sanctioned way to populate fact_embeddings — the same
+        rule that keeps raw SQL out of the fact-write path, for the same reason:
+        a hand-written INSERT would skip the normalisation in
+        embeddings.to_blob() and produce vectors that the cosine scan silently
+        mis-ranks instead of rejecting.
+
+        With *force* false, a row that already exists for the CURRENT model and
+        dim is left alone, so a backfill can be re-run over a partly populated
+        store without re-embedding what is already correct.
+        """
+        if not embeddings.available():
+            return False
+        model = embeddings.resolve_model()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT content FROM facts WHERE fact_id = ?", (fact_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            text = content if content is not None else row["content"]
+            if not force:
+                existing = self._conn.execute(
+                    "SELECT model, dim FROM fact_embeddings WHERE fact_id = ?",
+                    (fact_id,),
+                ).fetchone()
+                if existing is not None and existing["model"] == model:
+                    return False
+
+        # OUTSIDE the lock. This is an HTTP call that can take seconds against a
+        # cold llama-swap, and the lock it would otherwise hold is the process-
+        # wide write lock every other provider in the gateway shares.
+        vector = embeddings.embed_one(text, model=model)
+        if not vector:
+            return False
+        blob = embeddings.to_blob(vector)
+
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO fact_embeddings (fact_id, model, dim, vector, updated_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(fact_id) DO UPDATE SET
+                    model = excluded.model,
+                    dim = excluded.dim,
+                    vector = excluded.vector,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (fact_id, model, len(vector), blob),
+            )
+            self._conn.commit()
+            self._entry["embed_on"] = True
+        return True
+
+    def missing_embeddings(self, limit: int = 0) -> "list[tuple[int, str]]":
+        """(fact_id, content) for facts with no vector for the CURRENT model.
+
+        Rows embedded by a DIFFERENT model count as missing: they are in another
+        vector space, so scoring them against this model's query vector is worse
+        than not scoring them at all. That makes a model swap self-healing —
+        change HERMES_EMBED_MODEL and the nightly heal job re-embeds the corpus.
+        """
+        model = embeddings.resolve_model()
+        sql = """
+            SELECT f.fact_id, f.content
+            FROM facts f
+            LEFT JOIN fact_embeddings e ON e.fact_id = f.fact_id
+            WHERE e.fact_id IS NULL OR e.model != ?
+            ORDER BY f.fact_id
+        """
+        params: list = [model]
+        if limit and limit > 0:
+            sql += " LIMIT ?"
+            params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [(int(r["fact_id"]), r["content"]) for r in rows]
+
+    def prune_orphan_embeddings(self) -> int:
+        """Delete vectors whose fact no longer exists. Returns the count.
+
+        remove_fact deletes the vector in the same transaction as the row, so
+        this store never creates an orphan itself. A process running code that
+        predates the table does: the gateway that was up when the migration
+        landed keeps deleting facts through the module it imported at startup,
+        which knows nothing about fact_embeddings. The dense scan already drops
+        an id it cannot resolve (retrieval._dense_candidates), so an orphan
+        costs a wasted slot in the top-k rather than a wrong answer — this is
+        hygiene for the nightly heal, not a correctness fix.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM fact_embeddings WHERE fact_id NOT IN"
+                " (SELECT fact_id FROM facts)"
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def backfill_embeddings(
+        self,
+        limit: int = 0,
+        batch: int = 0,
+        progress=None,
+    ) -> dict:
+        """Embed every fact that has no current vector. Returns a summary dict.
+
+        Batched, unlike ensure_embedding: measured against the live llama-swap
+        entry, 32 inputs per request runs ~2200 tok/s and does the whole
+        1008-fact corpus in about two minutes, while one request per fact pays
+        the round trip a thousand times. Batch 64 was no faster per token and
+        gave every failure a longer tail, so embeddings.BATCH is 32.
+
+        Shaped like backfill_entity_links(): a repair pass that is safe to
+        re-run, reports what it did, and never raises on a transport failure —
+        a half-finished backfill is a valid state that the next run completes.
+        """
+        summary = {"pending": 0, "embedded": 0, "failed": 0, "batches": 0}
+        if not embeddings.available():
+            summary["error"] = "numpy unavailable"
+            return summary
+        model = embeddings.resolve_model()
+        pending = self.missing_embeddings(limit=limit)
+        summary["pending"] = len(pending)
+        if not pending:
+            return summary
+
+        size = batch or embeddings.BATCH
+        for start in range(0, len(pending), size):
+            chunk = pending[start : start + size]
+            vectors = embeddings.embed([content for _, content in chunk], model=model)
+            summary["batches"] += 1
+            if vectors is None:
+                summary["failed"] += len(chunk)
+                if progress:
+                    progress(summary)
+                # Keep going: a single failed batch is usually a cold-start
+                # timeout on the first request, and abandoning the run would
+                # leave the corpus split across two vector states for a day.
+                continue
+            rows = [
+                (fact_id, model, len(vec), embeddings.to_blob(vec))
+                for (fact_id, _), vec in zip(chunk, vectors)
+            ]
+            with self._lock:
+                self._conn.executemany(
+                    """
+                    INSERT INTO fact_embeddings (fact_id, model, dim, vector, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(fact_id) DO UPDATE SET
+                        model = excluded.model,
+                        dim = excluded.dim,
+                        vector = excluded.vector,
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    rows,
+                )
+                self._conn.commit()
+                self._entry["embed_on"] = True
+            summary["embedded"] += len(rows)
+            if progress:
+                progress(summary)
+        return summary
+
+    def embedding_matrix(self):
+        """(fact_ids, matrix) for the whole corpus, or None when unavailable.
+
+        Brute force is the right answer at this scale and will stay right for a
+        long time: 1008 facts x 1024 float32 is 4 MB and one matmul, against
+        which any vector database would be pure operational surface. The cache
+        is what keeps it cheap per search — rebuilding it is a 4 MB read, and
+        prefetch calls search() every turn.
+
+        Cache validity is (model, row count, max updated_at). The MODEL is in
+        the key because the matrix is filtered by it: swap HERMES_EMBED_MODEL
+        without re-embedding and the count and timestamp are both unchanged,
+        so a key without it would hand back the previous model's matrix to be
+        scored against a query vector from the new one — two vector spaces
+        silently dotted together, which reads as "the dense lane got worse"
+        rather than as an error. The count and timestamp catch inserts and the
+        nightly heal's refreshes; they would miss two processes rewriting the
+        same row within one clock second, a state no writer here can produce
+        (ensure_embedding is the only writer and the shared lock serialises it).
+        """
+        if not embeddings.available():
+            return None
+        numpy = hrr._np()
+        model = embeddings.resolve_model()
+        with self._lock:
+            try:
+                stamp = self._conn.execute(
+                    "SELECT COUNT(*), MAX(updated_at) FROM fact_embeddings"
+                ).fetchone()
+            except sqlite3.DatabaseError:
+                return None
+            key = (model, int(stamp[0]), stamp[1])
+            if key[1] == 0:
+                return None
+            cached = self._entry.get("embed_cache")
+            if cached is not None and cached[0] == key:
+                return cached[1], cached[2]
+            rows = self._conn.execute(
+                "SELECT fact_id, dim, vector FROM fact_embeddings WHERE model = ?"
+                " ORDER BY fact_id",
+                (model,),
+            ).fetchall()
+
+        ids: list[int] = []
+        vectors: list = []
+        dim = None
+        for row in rows:
+            if dim is None:
+                dim = int(row["dim"])
+            if int(row["dim"]) != dim:
+                # Mixed dims inside one model name means the served model was
+                # re-quantised or re-aliased under the same name. Skipping the
+                # odd ones out keeps the matmul well-formed; the heal job's
+                # model check will not catch this, so say so once.
+                logger.warning(
+                    "fact_embeddings holds dim %s and dim %s under model %r;"
+                    " skipping the minority. Re-run the embedding backfill.",
+                    dim,
+                    row["dim"],
+                    model,
+                )
+                continue
+            vec = embeddings.from_blob(row["vector"], dim)
+            if vec is None:
+                continue
+            ids.append(int(row["fact_id"]))
+            vectors.append(vec)
+
+        if not vectors:
+            return None
+        matrix = numpy.vstack(vectors)
+        id_array = numpy.asarray(ids, dtype=numpy.int64)
+        with self._lock:
+            self._entry["embed_cache"] = (key, id_array, matrix)
+        return id_array, matrix
 
     def backfill_entity_links(self) -> dict:
         """Additively re-run entity extraction (content + tags) over every fact.

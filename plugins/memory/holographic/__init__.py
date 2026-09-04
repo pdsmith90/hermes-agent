@@ -26,7 +26,7 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 from utils import is_truthy_value
 from .store import MemoryStore
-from .retrieval import FactRetriever
+from .retrieval import FactRetriever, no_confident_match
 from hermes_cli.config import cfg_get
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,11 @@ FACT_STORE_SCHEMA = {
         "fact_store for deep recall and compositional queries.\n\n"
         "ACTIONS (simple → powerful):\n"
         "• add — Store a fact the user would expect you to remember.\n"
-        "• search — Keyword lookup ('editor config', 'deploy process').\n"
+        "• search — Ranked recall. Since 2026-09-04 it is keyword AND semantic: "
+        "candidates come from a keyword index UNIONed with an embedding index, so "
+        "a question that shares no words with the stored fact ('why did the "
+        "overnight job keep redoing finished work') can still find it. Use it for "
+        "prose questions, not only for literal terms like 'editor config'.\n"
         "• probe — Entity recall: ALL facts about a person/thing.\n"
         "• related — What connects to an entity? Structural adjacency.\n"
         "• reason — Compositional: facts connected to MULTIPLE entities simultaneously.\n"
@@ -52,7 +56,14 @@ FACT_STORE_SCHEMA = {
         "• get — Exact fetch of ONE fact by fact_id (verify a write landed; "
         "search cannot prove absence).\n"
         "• update/remove/list — CRUD operations.\n\n"
-        "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first."
+        "IMPORTANT: Before answering questions about the user, ALWAYS probe or reason first.\n\n"
+        "ABSTENTION: a search reply may carry \"no_confident_match\": true alongside "
+        "its results. It means the best match scored below a calibrated relevance "
+        "floor — the rows are still there and may still be useful, but the store is "
+        "telling you it probably does not hold the answer. Treat it as a reason to "
+        "say you do not know, or to look elsewhere, rather than as a reason to "
+        "present the returned rows as the answer. Its absence is not a guarantee of "
+        "correctness; it only fires when the cross-encoder ran."
     ),
     "parameters": {
         "type": "object",
@@ -531,13 +542,26 @@ class HolographicMemoryProvider(MemoryProvider):
                 return json.dumps({"fact_id": fact_id, "status": "added"})
 
             elif action == "search":
-                results = retriever.search(
+                results, meta = retriever.search(
                     args["query"],
                     category=args.get("category"),
                     min_trust=float(args.get("min_trust", self._min_trust)),
                     limit=int(args.get("limit", 10)),
+                    with_meta=True,
                 )
-                return json.dumps({"results": results, "count": len(results)})
+                payload = {"results": results, "count": len(results)}
+                # Sibling keys, never a mutation of `results` or a filter on it:
+                # the handoff's rule is that rows below the floor are still
+                # returned and the caller decides. Same shape as the
+                # {"found": false, ...} precedent in action=get — an unhelpful
+                # answer is a RESULT, not an error. The verdict comes from
+                # retrieval.no_confident_match so this door and the MCP bridge
+                # cannot drift apart; see ABSTAIN_FLOOR.
+                verdict = no_confident_match(meta)
+                if verdict:
+                    payload["no_confident_match"] = True
+                    payload.update(verdict)
+                return json.dumps(payload)
 
             elif action == "probe":
                 results = retriever.probe(
