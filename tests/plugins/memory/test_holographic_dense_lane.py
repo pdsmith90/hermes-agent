@@ -439,9 +439,46 @@ class TestAbstention:
         results, meta = r.search("deploy rolled", with_meta=True)
         assert meta["reranked"] is True
         assert meta["top_ce"] == pytest.approx(0.37)
-        # score carries trust and decay; top_ce must not.
-        assert meta["top_score"] == pytest.approx(0.37 * (0.5 + 0.5 * 0.5))
-        assert all("_ce" not in f and "_decay" not in f for f in results)
+        # top_score is an RRF score since 2026-09-05 — with every ce equal the
+        # two rankings agree, so the winner is rank 1 in both. The point of the
+        # assertion is unchanged: top_score carries policy, top_ce must not.
+        from plugins.memory.holographic.retrieval import _RRF_K
+
+        assert meta["top_score"] == pytest.approx(2.0 / (_RRF_K + 1.0))
+        assert meta["top_ce"] != pytest.approx(meta["top_score"])
+        assert all(
+            "_ce" not in f and "_decay" not in f and "_ce_final" not in f
+            for f in results
+        )
+
+    def test_top_ce_is_the_best_returned_row_not_rank_zero(
+        self, store, fake_backend, monkeypatch
+    ):
+        """The gate must not be a function of the ranking policy.
+
+        Rank 0 is chosen by RRF, which can seat a blend-favoured row the
+        cross-encoder scored near zero above rows it scored ~1.0. Reading rank
+        0's ce alone made the calibrated floor move whenever the ranking moved
+        — that is what forced the 2026-09-05 recalibration. top_ce is the best
+        ce among the rows the caller actually gets, so a result set containing
+        a confident answer never reads as "no confident match" merely because
+        something else sorted above it.
+        """
+        store.add_fact("LESSON: the deploy was rolled back after the outage")
+        store.add_fact("LESSON: deploy rollback runbook, second note")
+        r = FactRetriever(store, rerank_url="http://stub")
+        # Whichever row lands at rank 0, one of the two scored 0.99.
+        seen = {}
+
+        def _stub(query, docs):
+            seen["docs"] = docs
+            return [0.01, 0.99][: len(docs)]
+
+        monkeypatch.setattr(r, "_rerank_scores", _stub)
+        results, meta = r.search("deploy rollback", with_meta=True)
+        assert len(results) == 2
+        assert meta["top_ce"] == pytest.approx(0.99)
+        assert no_confident_match(meta, floor=0.5) is None
 
     def test_the_fact_store_door_adds_sibling_keys_and_keeps_every_row(
         self, tmp_path, fake_backend, monkeypatch

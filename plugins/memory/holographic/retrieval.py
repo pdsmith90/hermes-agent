@@ -79,6 +79,39 @@ logger = logging.getLogger(__name__)
 _DENSE_SHARE = {"lexical": 0.10, "semantic": 0.50}
 _DENSE_K = {"lexical": 4, "semantic": 24}
 
+# Reciprocal-rank-fusion constant for stage 3 (2026-09-05).
+#
+# Until now the cross-encoder REPLACED the blend ordering outright, throwing
+# away BM25 + Jaccard + HRR + dense. Measured over the 56-probe set with the
+# pools and ce scores captured from one live pass, that cost more than it
+# bought: entity hit@5 0.79 against 0.93 for the same pool unreranked, and
+# overall hit@1 0.41 against 0.54. The cross-encoder is very good at "is this
+# passage about this question" and blind to which token was the POINT of a
+# literal query, which is exactly what BM25 knows.
+#
+# Fusing the two rankings instead of replacing one with the other beats
+# replacement on every metric and regresses no probe type:
+#
+#          hit@1  hit@5  hit@8   MRR   entity  lexical  paraphrase  supersession
+#   replace  0.41   0.80   0.86  0.555   0.79     0.85      0.79        0.80
+#   RRF K=5  0.52   0.89   0.95  0.660   1.00     0.85      0.88        0.80
+#
+# K is flat over 0-6 on every metric (h@5 0.89, entity 1.00, paraphrase 0.88)
+# and decays back toward replacement above ~15, so this is a plateau rather
+# than a tuned point. 5 is chosen inside it rather than at the K=0 boundary,
+# where rank 1 scores twice rank 2 and the ordering would be fragile to any
+# change in pool character; 5 also takes the plateau's best hit@8. A bootstrap
+# over 400 resamples of the probe set puts P(RRF beats replacement on hit@5) at
+# 0.983 for every K in 2-5, against 0.56 at the conventional K=60.
+#
+# WHY RANKS AND NOT A WEIGHTED SUM OF SCORES: the two scales are not
+# comparable and not stably comparable. The blend is an additive relevance
+# times raw trust times decay; ce is P(yes) from a softmax that measured
+# 0.9997-0.9988 across seven on-topic facts. Any convex mix needs a calibration
+# that would have to be re-fit whenever the reranker model changes. Rank fusion
+# needs none, which is the whole reason it is the standard choice here.
+_RRF_K = 5.0
+
 # Token shapes that say "this query names something literally".
 #
 # NO APOSTROPHE RULE. An early version treated any ' as a quoted literal and
@@ -154,7 +187,9 @@ def _search_meta(
         "n_results": len(results),
         "top_score": float(results[0].get("score", 0.0)) if results else 0.0,
         # The abstention floor goes HERE, not on top_score. See the _ce stash
-        # in search() for the measurement that settles it.
+        # in search() for the measurement that settles it. This is the BEST
+        # cross-encoder score among the returned rows, not rank 0's — see the
+        # assignment in search() for why the distinction became load-bearing.
         "top_ce": top_ce,
     }
 
@@ -209,17 +244,31 @@ def _env_float(name: str, default: float) -> float:
 # Detecting a fabricated premise needs entailment, not similarity.
 #
 # So the floor is set at the MAX-MARGIN point of the empty band between the
-# "nothing stored" cluster (top 0.025) and the answerable tail (bottom 0.189),
-# rather than at the Youden-J maximum. Youden picks 0.984 — it does catch all
-# ten negatives, but it also abstains on 43% of questions the store CAN answer,
-# which is a far more damaging error: the caller loses a real answer, while a
-# missed abstention still hands them the rows to judge. At 0.107:
+# "nothing stored" cluster and the answerable tail, rather than at the Youden-J
+# maximum. Youden still picks 0.984 — it catches nine of ten negatives, but it
+# also abstains on 20% of questions the store CAN answer, which is a far more
+# damaging error: the caller loses a real answer, while a missed abstention
+# still hands them the rows to judge.
 #
-#   * 96.3% of answerable questions pass (2 of 54 abstained)
-#   * both of those two are probes where retrieval genuinely FAILED to surface
-#     the gold fact — so the gate is right about them, and its true cost on
-#     this set is zero
-#   * 6 of 10 unanswerable are flagged, including 4 of the 5 pure-absence ones
+# RECALIBRATED 2026-09-05 for the rank-fusion change, on 56 answerable and 10
+# unanswerable probes. Two things moved: the ranking (so a different row can be
+# at rank 0) and, because of that, the signal itself, which is now the max ce
+# over the RETURNED rows rather than rank 0's ce — see the top_ce assignment in
+# search(). The band is (0.0242, 0.0386]: everything in it flags the same five
+# negatives and abstains on the same single answerable probe. 0.031 is its
+# midpoint. At 0.031:
+#
+#   * 55 of 56 answerable questions pass
+#   * the one that does not (p39) is a probe where retrieval genuinely failed
+#     to return the gold fact at all, so the gate is right about it and its
+#     true cost on this set is ZERO false abstentions
+#   * 5 of 10 unanswerable are flagged — all five of the pure-absence ones
+#
+# The five it does not flag are the false-premise class plus one absence
+# question phrased in fully in-corpus vocabulary; they score 0.917-0.999,
+# which is the scope limit above restated as a number. Do not try to close that
+# gap by raising the floor: the next answerable probe sits at 0.0386, so every
+# step up buys unanswerable coverage with real answers.
 #
 # SECOND SCOPE LIMIT, measured on the live store 2026-09-04 after activation:
 # ce depends on how SPECIFIC the query is, not only on what the store holds.
@@ -238,7 +287,11 @@ def _env_float(name: str, default: float) -> float:
 # query-length band; do that only if short-query abstention turns out to matter.
 #
 # Set HERMES_ABSTAIN_FLOOR=0 to disable the gate entirely.
-_ABSTAIN_FLOOR_DEFAULT = 0.107
+#
+# NOT COMPARABLE to the 0.107 this shipped with on 2026-09-04: that floor sat
+# on rank 0's ce under a different ranking. Any note quoting 0.107 predates the
+# fusion change.
+_ABSTAIN_FLOOR_DEFAULT = 0.031
 ABSTAIN_FLOOR = _env_float("HERMES_ABSTAIN_FLOOR", _ABSTAIN_FLOOR_DEFAULT)
 
 
@@ -285,6 +338,7 @@ class FactRetriever:
         rerank_max_doc_chars: int = 3000,
         dense_url: str | None = None,
         dense_timeout: float | None = None,
+        rerank_fusion: bool = True,
     ):
         self.store = store
         self.half_life = temporal_decay_half_life
@@ -332,6 +386,11 @@ class FactRetriever:
         # head of the query — and turns a hard failure into a bounded request.
         self.rerank_max_query_chars = rerank_max_query_chars
         self.rerank_max_doc_chars = rerank_max_doc_chars
+        # False reproduces the pre-2026-09-05 behaviour exactly — the
+        # cross-encoder replacing the blend order. It exists for the retrieval
+        # eval's ablation ladder, in the same way hrr_weight=0 does; production
+        # never sets it.
+        self.rerank_fusion = rerank_fusion
 
         # Auto-redistribute weights if numpy unavailable
         if hrr_weight > 0 and not hrr._HAS_NUMPY:
@@ -361,9 +420,16 @@ class FactRetriever:
         2. Jaccard boost: Token overlap between query and fact content
         3. Trust weighting: final_score = relevance * trust_score
         4. Temporal decay (optional): decay = 0.5^(age_days / half_life)
-        5. Cross-encoder rerank (optional): score = ce * (0.5 + 0.5*trust) *
-           decay — same pool, reordered; the trust term is clamped there
-           because the cross-encoder saturates. See stage 3 below.
+        5. Cross-encoder rerank (optional): the same pool is scored
+           ce * (0.5 + 0.5*trust) * decay — the trust term is clamped there
+           because the cross-encoder saturates — and the resulting ranking is
+           FUSED with the blend ranking by RRF rather than replacing it. See
+           stage 3 and _RRF_K.
+
+        The returned 'score' is therefore an RRF score whenever the reranker
+        was reachable, and a trust-weighted relevance otherwise. Neither is a
+        confidence measure; no_confident_match() reads the raw cross-encoder
+        score for that, and deliberately makes no claim when reranked is False.
 
         Returns list of dicts with fact data + 'score' field, sorted by score
         desc. With *with_meta*, returns (results, meta) instead — meta carries
@@ -512,6 +578,9 @@ class FactRetriever:
             ce = self._rerank_scores(query, [f["content"] for f in scored])
             if ce is not None:
                 reranked = True
+                # `scored` is in blend order at this point, so a candidate's
+                # index IS its blend rank — RRF's first ranking, for free.
+                ce_final = []
                 for fact, ce_score in zip(scored, ce):
                     # ce_score is already P(yes) in [0,1] (RANK pooling softmaxes
                     # in-graph for QWEN3). Trust weighting is preserved so a
@@ -536,7 +605,7 @@ class FactRetriever:
                     # term has real dynamic range, so trust cannot swamp it
                     # there, and the tuned fts/jaccard/hrr weights assume the
                     # raw multiplier.
-                    fact["score"] = (
+                    ce_final.append(
                         ce_score
                         * (0.5 + 0.5 * fact["trust_score"])
                         * fact.get("_decay", 1.0)
@@ -552,12 +621,60 @@ class FactRetriever:
                     # abstains on the second also abstains on the first. ce is
                     # the only term here that is a relevance judgement.
                     fact["_ce"] = ce_score
-                scored.sort(key=lambda x: x["score"], reverse=True)
+                    fact["_ce_final"] = ce_final[-1]
+
+                if self.rerank_fusion:
+                    # Reciprocal rank fusion of the blend order and the ce
+                    # order (see _RRF_K).
+                    #
+                    # THE TIEBREAK IS LOAD-BEARING, and it is not the stable
+                    # sort's. Symmetric fusion ties EXACTLY whenever the two
+                    # lists merely swap a pair — blend (1,2) against ce (2,1)
+                    # both give 1/(K+1) + 1/(K+2) — and a stable sort hands
+                    # every one of those to the blend, which has already had
+                    # its say inside the score. Double-counting it that way
+                    # reinstates the exact failure the trust clamp was added to
+                    # fix: the live F1 shape where a stale trust-0.70 row
+                    # ("RETIRED", ce 0.9599) sat above the trust-0.50 row that
+                    # answered the question (ce 0.9990). ce_final is the term
+                    # that has not been counted twice, so it breaks the tie.
+                    ce_rank = [0] * len(scored)
+                    for pos, idx in enumerate(
+                        sorted(range(len(scored)),
+                               key=lambda i: ce_final[i], reverse=True)
+                    ):
+                        ce_rank[idx] = pos + 1
+                    for idx, fact in enumerate(scored):
+                        fact["score"] = (
+                            1.0 / (_RRF_K + idx + 1)
+                            + 1.0 / (_RRF_K + ce_rank[idx])
+                        )
+                    scored.sort(
+                        key=lambda x: (x["score"], x.pop("_ce_final")), reverse=True
+                    )
+                else:
+                    for fact, final in zip(scored, ce_final):
+                        fact["score"] = final
+                        fact.pop("_ce_final", None)
+                    scored.sort(key=lambda x: x["score"], reverse=True)
 
         results = scored[:limit]
         # Strip raw HRR bytes and the internal decay stash — callers expect
         # JSON-serializable dicts holding only store columns plus "score".
-        top_ce = float(results[0].get("_ce", 0.0)) if results else 0.0
+        # MAX over the returned rows, not rank 0's. The gate answers "is any of
+        # what I am about to show you actually an answer", and since 2026-09-05
+        # rank 0 is decided by RRF, which can seat a blend-favoured row the
+        # cross-encoder scored near zero at the top of an otherwise good result
+        # set. Reading rank 0 alone made the floor a function of the ranking
+        # policy: recalibrating rank 0's ce after the fusion change moved the
+        # floor 0.107 -> 0.047 and still put three answerable probes below it
+        # whose gold was sitting in the returned rows with ce ~1.0. Max over
+        # the returned rows is invariant to
+        # how those rows are ordered, which is the property that keeps the
+        # calibration alive across the next ranking change. It is NOT max over
+        # the whole pool: a relevant fact the caller never sees is not a reason
+        # to claim confidence.
+        top_ce = max((float(f.get("_ce", 0.0)) for f in results), default=0.0)
         for fact in results:
             fact.pop("hrr_vector", None)
             fact.pop("_decay", None)

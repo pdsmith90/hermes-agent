@@ -149,7 +149,7 @@ class TestDecaySurvivesTheRerank:
 class TestTrustClampOnTheRerankedPath:
     """Leg (c): trust may at most halve a score, it may not decide the order."""
 
-    def test_score_is_ce_times_clamped_trust_times_decay(self, store):
+    def _clamp_fixture(self, store):
         fid = store.add_fact("MARKER-ONE: document-store reranker sizing on the GPU.")
         # Stage 3 only runs on a pool of more than one, so the decoy is load-
         # bearing: with a single candidate this would silently measure the
@@ -157,14 +157,57 @@ class TestTrustClampOnTheRerankedPath:
         store.add_fact("MARKER-TWO: document-store reranker sizing, second note on GPU.")
         _set_trust(store, fid, 0.70)
         _age(store, fid, 60)  # exactly one half-life
+        return fid
 
-        r = FactRetriever(store, temporal_decay_half_life=60)
+    def test_score_is_ce_times_clamped_trust_times_decay(self, store):
+        """The formula itself, on the path where it is still the score.
+
+        Since the 2026-09-05 rank-fusion change the cross-encoder's product no
+        longer becomes `score` on the production path — it becomes one of the
+        two RANKINGS that RRF fuses (`ce_final` in search()). It is still
+        computed exactly as before, and rerank_fusion=False is the arm that
+        exposes it directly, so that is where the arithmetic is pinned. The
+        ORDERING consequences of the clamp are covered by the two tests below,
+        which run on the production path.
+        """
+        fid = self._clamp_fixture(store)
+        r = FactRetriever(store, temporal_decay_half_life=60, rerank_fusion=False)
         _stub_rerank(r, {"MARKER-ONE": 0.90, "MARKER-TWO": 0.10})
 
         results = {f["fact_id"]: f for f in r.search("document-store reranker gpu")}
         assert results[fid]["score"] == pytest.approx(
             0.90 * (0.5 + 0.5 * 0.70) * 0.5, rel=1e-3
         )
+
+    def test_fused_score_is_an_rrf_score_not_the_ce_product(self, store):
+        """Guards the scale change, which callers can see.
+
+        A consumer that thresholds on `score` would silently misbehave if this
+        ever reverted: the fused score is a sum of two reciprocal ranks,
+        nowhere near the ce product.
+
+        This fixture is also the two lists DISAGREEING, which is the case worth
+        pinning. MARKER-ONE is ce rank 1 (0.90 against 0.10) but blend rank 2,
+        because one half-life of decay takes its raw trust term to 0.70 * 0.5 =
+        0.35 against the decoy's 0.50 * 1.0. So its fused score is
+        1/(K+2) + 1/(K+1), and it still comes out on top — the cross-encoder
+        wins a rank-1-versus-rank-2 disagreement on the ce tiebreak.
+        """
+        from plugins.memory.holographic.retrieval import _RRF_K
+
+        fid = self._clamp_fixture(store)
+        r = FactRetriever(store, temporal_decay_half_life=60)
+        _stub_rerank(r, {"MARKER-ONE": 0.90, "MARKER-TWO": 0.10})
+
+        ordered = r.search("document-store reranker gpu")
+        results = {f["fact_id"]: f for f in ordered}
+        assert results[fid]["score"] == pytest.approx(
+            1.0 / (_RRF_K + 2.0) + 1.0 / (_RRF_K + 1.0)
+        )
+        assert ordered[0]["fact_id"] == fid
+        # and the internal stashes never reach the caller
+        assert "_ce_final" not in results[fid]
+        assert "_ce" not in results[fid]
 
     def test_stale_high_trust_loses_to_fresh_default_trust(self, store):
         """The live F1 shape, with the measured numbers from the audit.
