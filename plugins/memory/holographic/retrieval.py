@@ -171,6 +171,7 @@ def _search_meta(
     reranked: bool,
     dense_raw: "dict[int, float]",
     top_ce: float = 0.0,
+    ce_per_row: "list[float] | None" = None,
 ) -> dict:
     """Per-QUERY confidence signals for the abstention gate (Track 2).
 
@@ -188,11 +189,22 @@ def _search_meta(
         "dense_candidates": len(dense_raw),
         "n_results": len(results),
         "top_score": float(results[0].get("score", 0.0)) if results else 0.0,
+        # PER-ROW raw cross-encoder scores, aligned to `results`. Added
+        # 2026-09-04 because rank fusion made `score` unusable as a per-row
+        # relevance signal: an RRF score is 1/(K+rank) + 1/(K+rank), so it is
+        # bounded AWAY from zero no matter how irrelevant the row is — rank 5
+        # of a small pool still scores ~0.18. Any consumer that floored on
+        # `score` was silently disabled by that change, which is exactly what
+        # happened to claude-recall-hook.py's SCORE_FLOOR. Empty when the
+        # cross-encoder did not run, for the same reason top_ce is 0.0 there:
+        # the blend lives on a different scale and no floor calibrated on one
+        # means anything against the other.
         # The abstention floor goes HERE, not on top_score. See the _ce stash
         # in search() for the measurement that settles it. This is the BEST
         # cross-encoder score among the returned rows, not rank 0's — see the
         # assignment in search() for why the distinction became load-bearing.
         "top_ce": top_ce,
+        "ce": list(ce_per_row or []),
     }
 
 
@@ -344,6 +356,36 @@ def no_confident_match(meta: dict, floor: "float | None" = None) -> "dict | None
 # of the catches for 1/8 of the cost and halves the number of model calls.
 _ENTAIL_SHAPE = "lexical"
 
+# The judge is asked "do these facts ANSWER the question?", so it may only be
+# shown something that IS a question. A bare noun phrase has no answer, and the
+# model correctly says so: measured 8 of 8 bare entity names ("CubeOH",
+# "LightRAG", "R9700", ...) abstaining with 8 good rows returned and top_ce
+# 0.987-1.000. That query form is not an edge case — it is what
+# consolidate-synthesize STEP 1(b) issues all night, and what about()/probe()
+# callers type.
+#
+# The calibration set is the reason this was invisible: all 56 answerable
+# probes are question-mark-terminated natural-language questions of ten words
+# or more, so the noun-phrase population sits entirely outside the 1/56 false
+# abstention figure. This guard does not narrow that set — every probe in it
+# still qualifies — it just declines to judge the population that was never
+# measured. The shape gate is NOT the fix: asked directly, the judge rejects
+# bare noun phrases on the semantic path too.
+_INTERROGATIVE = re.compile(
+    r"^\s*(what|which|how|why|when|where|who|whose|whom|is|are|was|were|do|does"
+    r"|did|can|could|should|would|will|has|have|had|am|any|if|tell|explain)\b",
+    re.IGNORECASE,
+)
+_ENTAIL_MIN_WORDS = 6
+
+
+def _is_question(query: str) -> bool:
+    """Is this something a yes/no "does it answer it" judgement can apply to?"""
+    q = (query or "").strip()
+    if len(q.split()) < _ENTAIL_MIN_WORDS:
+        return False
+    return "?" in q or bool(_INTERROGATIVE.match(q))
+
 
 def no_entailed_answer(
     query: str,
@@ -363,13 +405,16 @@ def no_entailed_answer(
 
     Returns None — make no claim — in every situation except a model that
     actually ran and actually said no. That covers the lane being switched off,
-    the query not being lexical-shaped, an empty result set, an unreachable or
-    slow model, and an unparseable reply. NOT running on the per-turn prefetch
+    the query not being lexical-shaped, THE QUERY NOT BEING A QUESTION, an
+    empty result set, an unreachable or slow model, and an unparseable reply. NOT running on the per-turn prefetch
     path is the caller's job, and the reason this is a free function rather
     than a step inside search(): a ~1.4 s model call must be something a door
     opts into, not something every turn inherits.
     """
     if not results or meta.get("shape") != _ENTAIL_SHAPE:
+        return None
+    # Only judge something that is actually a question — see _is_question.
+    if not _is_question(query):
         return None
     # The cross-encoder must have run. Without it the pool ordering came from
     # the blend, so `results` is a different population from the one this was
@@ -738,6 +783,7 @@ class FactRetriever:
         # the whole pool: a relevant fact the caller never sees is not a reason
         # to claim confidence.
         top_ce = max((float(f.get("_ce", 0.0)) for f in results), default=0.0)
+        ce_per_row = [float(f.get("_ce", 0.0)) for f in results] if reranked else []
         for fact in results:
             fact.pop("hrr_vector", None)
             fact.pop("_decay", None)
@@ -750,7 +796,8 @@ class FactRetriever:
         except Exception:
             logger.debug("mark_retrieved failed", exc_info=True)
         if with_meta:
-            return results, _search_meta(shape, results, reranked, dense_raw, top_ce)
+            return results, _search_meta(
+                shape, results, reranked, dense_raw, top_ce, ce_per_row)
         return results
 
     def _dense_candidates(

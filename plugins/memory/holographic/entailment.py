@@ -74,6 +74,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.request
 
@@ -129,30 +130,35 @@ def resolve_timeout() -> float:
         return DEFAULT_TIMEOUT
 
 
-def _parse(text: str) -> "bool | None":
-    """LAST verdict wins, and an unparseable reply is None, not a guess.
+# Exactly YES or NO, as a whole word, right after the label. Not a substring
+# test: "NO" is inside NONE, UNKNOWN, NOT ENOUGH INFORMATION and CANNOT
+# DETERMINE, every one of which is a REFUSAL to judge and was being read as a
+# confident no — an abstention invented by the parser, which is the one thing
+# this module's contract forbids.
+_VERDICT_RE = re.compile(r"VERDICT\s*:?\s*(YES|NO)\b", re.IGNORECASE)
 
-    Last rather than first because a model that restates the instruction before
-    answering emits the word VERDICT twice; the trailing one is its own. One
-    reply in 66 was unparseable in the measured run, and treating that as a NO
-    would have been a false abstention invented by the parser.
+
+def _parse(text: str) -> "bool | None":
+    """The model's verdict, or None when it did not give exactly one.
+
+    UNANIMITY, not last-wins. Last-wins was justified by a model that restates
+    the instruction BEFORE answering, and it is wrong in the other direction:
+    this module's own PROMPT ends "...VERDICT: YES or VERDICT: NO", so any
+    reply that echoes that line AFTER its answer — or merely says "the
+    alternative verdict would be NO" — ends on a NO window and silently
+    inverted a YES into an abstention.
+
+    Disagreeing verdicts therefore mean "no judgement", not "the last one".
+    That is the safe direction on both counts: an echo can no longer
+    manufacture an abstention, and a genuine NO buried in an echo is merely
+    lost rather than inverted. An unparseable reply stays None — one reply in
+    66 was unparseable in the measured run, and reading it as NO would be a
+    false abstention the model never gave.
     """
     if not text:
         return None
-    upper = text.upper()
-    hits = []
-    idx = 0
-    while True:
-        idx = upper.find("VERDICT", idx)
-        if idx < 0:
-            break
-        tail = upper[idx : idx + 40]
-        if "YES" in tail:
-            hits.append(True)
-        elif "NO" in tail:
-            hits.append(False)
-        idx += 7
-    return hits[-1] if hits else None
+    verdicts = {m.group(1).upper() == "YES" for m in _VERDICT_RE.finditer(text)}
+    return verdicts.pop() if len(verdicts) == 1 else None
 
 
 def answers_question(
@@ -194,7 +200,18 @@ def answers_question(
             body = json.load(resp)
         choice = body["choices"][0]
         return _parse(choice["message"].get("content") or "")
-    except (urllib.error.URLError, OSError, KeyError, IndexError,
-            ValueError, TimeoutError):
+    except Exception:
+        # BROAD ON PURPOSE, and not a lint slip. This function's entire
+        # contract is "never raises, None means no judgement", and an
+        # enumerated tuple cannot hold that line: http.client.HTTPException
+        # derives from Exception rather than OSError (so a truncated body or a
+        # garbled status line escaped), and walking
+        # body["choices"][0]["message"] raises TypeError or AttributeError on
+        # any response shaped differently than expected. Seven such shapes were
+        # found escaping. What escapes does not merely disable this lane — the
+        # fact_store door wraps the whole action in `except Exception` and
+        # returns a tool error, so a malformed reply from an OPTIONAL
+        # second-opinion model would discard a search that had already
+        # succeeded and ranked its rows.
         logger.debug("entailment check failed", exc_info=True)
         return None
