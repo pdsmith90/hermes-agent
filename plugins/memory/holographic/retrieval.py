@@ -262,13 +262,28 @@ def _env_float(name: str, default: float) -> float:
 #   * the one that does not (p39) is a probe where retrieval genuinely failed
 #     to return the gold fact at all, so the gate is right about it and its
 #     true cost on this set is ZERO false abstentions
-#   * 5 of 10 unanswerable are flagged — all five of the pure-absence ones
+#   * 5 of 10 unanswerable are flagged
 #
-# The five it does not flag are the false-premise class plus one absence
-# question phrased in fully in-corpus vocabulary; they score 0.917-0.999,
-# which is the scope limit above restated as a number. Do not try to close that
-# gap by raising the floor: the next answerable probe sits at 0.0386, so every
-# step up buys unanswerable coverage with real answers.
+# WHICH five is the interesting part, and it is NOT the absent/false-premise
+# split the probe file labels. Flagged: p48, p49, p50, p51 (absent) and p55
+# (false-premise, "Jellyfin on pdnas"). Missed: p47 (ABSENT, ce 0.951) and
+# p52/p53/p54/p56 (false-premise). What actually predicts the score is whether
+# the QUESTION'S VOCABULARY IS IN THE CORPUS:
+#
+#   p55 asks about Jellyfin — a media server nothing here has ever mentioned,
+#       so every token is off-corpus and ce is 0.0000 even though the question
+#       is a false premise rather than a simple gap.
+#   p47 asks how worn the NVMe holding the GGUF files is — pure absence, no
+#       SMART data anywhere in the store, but NVMe / GGUF / model files are
+#       saturated in-corpus vocabulary, so ce is 0.9510.
+#
+# So the scope limit above is better stated as: a cross-encoder scores TOPIC
+# OVERLAP, and cannot tell "we have no data on this property of a thing we talk
+# about constantly" from "here is that data". Absence and false premise are the
+# same failure wearing two labels. Closing it needs entailment — does this
+# passage SUPPORT this claim — not a better threshold. Do not try to close it
+# by raising the floor: the next answerable probe sits at 0.0386, so every step
+# up buys unanswerable coverage with real answers.
 #
 # SECOND SCOPE LIMIT, measured on the live store 2026-09-04 after activation:
 # ce depends on how SPECIFIC the query is, not only on what the store holds.
