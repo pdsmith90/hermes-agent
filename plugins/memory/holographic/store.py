@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS facts (
     hrr_vector      BLOB,
     source_session  TEXT DEFAULT '',
     valid_from      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    valid_until     TIMESTAMP
+    valid_until     TIMESTAMP,
+    superseded_by   INTEGER REFERENCES facts(fact_id)
 );
 
 CREATE TABLE IF NOT EXISTS entities (
@@ -552,6 +553,22 @@ class MemoryStore:
             # this column existed that pairing has to be recovered by an
             # operator pass over the corpus, not guessed at open time.
             self._conn.execute("ALTER TABLE facts ADD COLUMN valid_until TIMESTAMP")
+        if "superseded_by" not in columns:
+            # The FORWARD pointer, added 2026-09-05. valid_until records WHEN a
+            # claim stopped being current; until now nothing recorded WHAT
+            # replaced it. Only the reverse direction existed, in the
+            # retracting fact's own prose ("supersedes fid N"), which means a
+            # reader who lands on the retracted row has to full-text search for
+            # its own id to find the correction — and ranked search cannot
+            # guarantee it surfaces. The second-order gap was worse: the
+            # feedback trail that carried "retracted by fid N" is written
+            # inside a loop that BREAKS when trust already sits at the floor,
+            # which is the normal state for a fact retracted twice, so the
+            # second retraction left no record anywhere at all.
+            self._conn.execute(
+                "ALTER TABLE facts ADD COLUMN superseded_by INTEGER "
+                "REFERENCES facts(fact_id)"
+            )
         # UNCONDITIONALLY, not only when the column was just added. Adding a
         # column does not restart the processes already using this store, and
         # they keep INSERTing through the module they imported at startup —
@@ -564,6 +581,7 @@ class MemoryStore:
         # re-establishes every time it is opened, rather than a property of one
         # lucky moment.
         self._backfill_valid_from()
+        self._backfill_superseded_by()
         hist_columns = {
             row[1]
             for row in self._conn.execute("PRAGMA table_info(fact_history)").fetchall()
@@ -573,6 +591,60 @@ class MemoryStore:
                 "ALTER TABLE fact_history ADD COLUMN changed_by_session TEXT DEFAULT ''"
             )
         self._conn.commit()
+
+    def _backfill_superseded_by(self) -> None:
+        """Recover the forward pointer for windows closed before it existed.
+
+        Deterministic, not a guess: invalidate_fact stamps valid_until from the
+        RETRACTING fact's own created_at, so the retractor is the later fact
+        whose created_at equals this row's valid_until. Timestamps can collide,
+        so the candidate must also name this fid in the active voice — the same
+        regex add_fact matched to close the window in the first place. Anything
+        ambiguous is left NULL; a missing pointer is honest, a wrong one is not.
+
+        Runs on every open, like _backfill_valid_from and for a weaker version
+        of the same reason. Nothing INSERTs a closed window, so this normally
+        matches zero rows and costs one indexed scan; it exists so a window
+        closed by a long-lived process still running pre-2026-09-05 code does
+        not sit pointerless forever.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT fact_id, valid_until FROM facts "
+                " WHERE valid_until IS NOT NULL AND superseded_by IS NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:               # pragma: no cover
+            return                                     # pre-migration store
+        if not rows:
+            return
+        repaired = 0
+        for row in rows:
+            older, closed_at = row["fact_id"], row["valid_until"]
+            candidates = self._conn.execute(
+                "SELECT fact_id, content FROM facts "
+                " WHERE created_at = ? AND fact_id > ? ORDER BY fact_id",
+                (closed_at, older),
+            ).fetchall()
+            naming = [
+                c["fact_id"]
+                for c in candidates
+                if older in {int(m) for m in _SUPERSESSION_RE.findall(c["content"])}
+            ]
+            if len(naming) != 1:
+                logger.debug(
+                    "no unambiguous retractor for fid %s (closed %s, %d candidates)",
+                    older, closed_at, len(naming),
+                )
+                continue
+            self._conn.execute(
+                "UPDATE facts SET superseded_by = ? WHERE fact_id = ? "
+                "  AND superseded_by IS NULL",
+                (naming[0], older),
+            )
+            repaired += 1
+        if repaired:
+            self._conn.commit()
+            logger.info("recovered %d superseded_by pointer(s)", repaired)
 
     def _backfill_valid_from(self) -> None:
         """Stamp valid_from = created_at on every row that is missing it.
@@ -877,6 +949,12 @@ class MemoryStore:
         timestamp is deliberately impossible — see the validity-window comment
         at the top of this module.
 
+        Both columns move together and under the one `valid_until IS NULL`
+        predicate, because they record two halves of a single event. That also
+        means FIRST CLOSE WINS applies to the pointer: a fact retracted again a
+        month later still names the retraction that ended it, not the latest
+        one to mention it.
+
         No fact_history snapshot: the snapshot columns are content/category/
         tags/trust_score, none of which move here, so the row it wrote would
         assert a change it cannot show. The audit trail for a supersession
@@ -889,7 +967,9 @@ class MemoryStore:
             cur = self._conn.execute(
                 """
                 UPDATE facts
-                   SET valid_until = (SELECT created_at FROM facts WHERE fact_id = :newer)
+                   SET valid_until = (SELECT created_at FROM facts
+                                       WHERE fact_id = :newer),
+                       superseded_by = :newer
                  WHERE fact_id = :older
                    AND valid_until IS NULL
                    AND EXISTS (SELECT 1 FROM facts WHERE fact_id = :newer)
@@ -937,7 +1017,7 @@ class MemoryStore:
             sql = f"""
                 SELECT f.fact_id, f.content, f.category, f.tags,
                        f.trust_score, f.retrieval_count, f.helpful_count,
-                       f.created_at, f.updated_at
+                       f.created_at, f.updated_at, f.superseded_by
                 FROM facts f
                 JOIN facts_fts fts ON fts.rowid = f.fact_id
                 WHERE facts_fts MATCH ?
@@ -1348,7 +1428,7 @@ class MemoryStore:
             row = self._conn.execute(
                 "SELECT fact_id, content, category, tags, trust_score,"
                 " retrieval_count, helpful_count, created_at, updated_at,"
-                " valid_from, valid_until"
+                " valid_from, valid_until, superseded_by"
                 " FROM facts WHERE fact_id = ?",
                 (fact_id,),
             ).fetchone()

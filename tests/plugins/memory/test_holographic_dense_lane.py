@@ -538,3 +538,103 @@ class TestEmbeddingsModule:
         assert np.allclose(vec, [0.6, 0.8])
         assert embeddings.from_blob(blob, 3) is None
         assert embeddings.from_blob(b"", 2) is None
+
+
+class TestSupersededByPointer:
+    """The FORWARD pointer from a retracted fact to what replaced it.
+
+    valid_until has recorded WHEN a claim stopped being current since
+    2026-09-02; superseded_by records WHAT replaced it (2026-09-05). Only the
+    reverse direction existed before, in the retracting fact's own prose.
+    """
+
+    def test_retraction_records_the_retracting_fid(self, store):
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        new = store.add_fact(
+            f"LESSON: the reranker runs on the GPU — supersedes fid {old}."
+        )
+        row = store.get_fact(old)
+        assert row["superseded_by"] == new
+        assert row["valid_until"] is not None
+        assert store.get_fact(new)["superseded_by"] is None
+
+    def test_first_close_wins_for_the_pointer_too(self, store):
+        """A fact retracted twice names the retraction that ENDED it.
+
+        valid_until and superseded_by move under one predicate because they are
+        two halves of one event; letting the pointer drift to the latest
+        mention would contradict the timestamp sitting next to it.
+        """
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        first = store.add_fact(f"LESSON: actually the GPU — corrects fid {old}.")
+        second = store.add_fact(f"LESSON: the GPU, confirmed — corrects fid {old}.")
+        assert store.get_fact(old)["superseded_by"] == first != second
+
+    def test_forward_reference_never_sets_the_pointer(self, store):
+        """The passive voice names the NEWER fact, so it must not close a window."""
+        first = store.add_fact("LESSON: the reranker runs on the CPU.")
+        second = store.add_fact(
+            f"LESSON: the reranker runs on the GPU (superseded by fid {first})."
+        )
+        assert store.get_fact(second)["superseded_by"] is None
+        assert store.get_fact(first)["superseded_by"] is None
+
+    def test_pointer_is_recovered_for_windows_closed_before_the_column(self, store):
+        """The historical repair, which every store open re-runs.
+
+        Simulated by clearing the pointer while leaving valid_until set —
+        exactly the state a store migrated from before 2026-09-05 is in.
+        """
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        new = store.add_fact(
+            f"LESSON: the reranker runs on the GPU — supersedes fid {old}."
+        )
+        store._conn.execute(
+            "UPDATE facts SET superseded_by = NULL WHERE fact_id = ?", (old,)
+        )
+        store._conn.commit()
+        assert store.get_fact(old)["superseded_by"] is None
+
+        store._backfill_superseded_by()
+        assert store.get_fact(old)["superseded_by"] == new
+
+    def test_repair_leaves_an_ambiguous_retractor_null(self, store):
+        """A wrong pointer is worse than a missing one.
+
+        Two facts sharing the retractor's created_at and both naming the target
+        cannot be told apart, so neither is chosen.
+        """
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        a = store.add_fact(f"LESSON: the GPU actually — corrects fid {old}.")
+        b = store.add_fact(f"LESSON: the GPU indeed — corrects fid {old}.")
+        store._conn.execute(
+            "UPDATE facts SET created_at = (SELECT created_at FROM facts"
+            "   WHERE fact_id = ?) WHERE fact_id = ?", (a, b)
+        )
+        store._conn.execute(
+            "UPDATE facts SET superseded_by = NULL, valid_until ="
+            " (SELECT created_at FROM facts WHERE fact_id = ?) WHERE fact_id = ?",
+            (a, old),
+        )
+        store._conn.commit()
+        store._backfill_superseded_by()
+        assert store.get_fact(old)["superseded_by"] is None
+
+        # ...and prove that NULL is the ambiguity and not an inert repair:
+        # remove the second claimant and the same call now resolves.
+        store._conn.execute(
+            "UPDATE facts SET content = 'LESSON: unrelated note' WHERE fact_id = ?",
+            (b,),
+        )
+        store._conn.commit()
+        store._backfill_superseded_by()
+        assert store.get_fact(old)["superseded_by"] == a
+
+    def test_the_pointer_reaches_search_results(self, store, fake_backend):
+        old = store.add_fact("LESSON: the deploy rollback runs on the CPU.")
+        store.add_fact(
+            f"LESSON: the deploy rollback runs on the GPU — supersedes fid {old}."
+        )
+        r = FactRetriever(store, rerank_url="", dense_url="")
+        rows = {f["fact_id"]: f for f in r.search("deploy rollback", min_trust=0.0)}
+        assert rows[old]["superseded_by"] is not None
