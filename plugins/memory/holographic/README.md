@@ -108,10 +108,14 @@ rows for a different `model` count as missing.
 | `HERMES_EMBED_MODEL` | `jina-embed` | `model` field sent in the request; stored with each vector |
 | `HERMES_EMBED_TIMEOUT` | `8.0` | Per-request timeout; the gateway drop-in sets 15 for cold loads |
 | `HERMES_ABSTAIN_FLOOR` | calibrated constant | Cross-encoder floor below which search admits "no confident match" |
+| `HERMES_ENTAIL_URL` | *(unset = OFF)* | Chat-completions endpoint for the entailment leg of the gate. Unlike the two above, **this is the enable switch** — there is no table whose emptiness makes the lane inert, so each door opts in |
+| `HERMES_ENTAIL_MODEL` | `qwen35-4b-util` | Must co-load beside the reranker (llama-swap `retrieval` group) or it evicts the resident model |
+| `HERMES_ENTAIL_TIMEOUT` | `20.0` | Covers a cold load; every failure returns None ("no judgement") in ~0.01 s |
 
 The weighting is query-adaptive: a question carrying a quoted string, path,
-identifier, ALL-CAPS acronym or fid reference takes 8 dense candidates at a
-0.10 share of the blend; plain prose takes 24 at 0.50. See `_query_shape` in
+identifier, ALL-CAPS acronym or fid reference takes 4 dense candidates at a
+0.10 share of the blend; plain prose takes 24 at 0.50. (The lexical count was
+swept 8/4/2/0 and set to 4: 8 over-injected and cost lexical hit@5 0.85→0.77.) See `_query_shape` in
 `retrieval.py` for the routing and its measured error asymmetry. Rung
 `+dense` of `scripts/memory-retrieval-eval.py` isolates the lane's effect.
 
