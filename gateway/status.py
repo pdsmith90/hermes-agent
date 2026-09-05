@@ -21,6 +21,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -129,6 +130,35 @@ def record_start_and_check_storm(
         return None
 
 
+#: Throwaway home handed to a test that wiped the sandbox's HERMES_HOME.
+#: Created once per process so the PID/lock/status files written through it
+#: stay mutually consistent within a run, exactly as a real home would.
+_PYTEST_FALLBACK_HERMES_HOME: Optional[Path] = None
+
+
+def _running_under_pytest() -> bool:
+    """True when this process is a pytest run.
+
+    ``sys.modules`` is the load-bearing signal, not the environment.
+    ``patch.dict(os.environ, {...}, clear=True)`` — 41 uses in
+    tests/gateway/test_feishu.py alone — wipes ``PYTEST_CURRENT_TEST`` and
+    every other marker along with the sandbox's HERMES_HOME, so an env-only
+    probe (like ``hermes_state._running_under_pytest``) answers False inside
+    exactly the block that needs it.  An environ patch cannot touch
+    ``sys.modules``.
+
+    The env vars are still consulted for the case ``sys.modules`` cannot see:
+    a test that spawns a child process.  ``HERMES_TEST_ISOLATION`` is the
+    repo's own subprocess-surviving marker, exported by tests/conftest.py.
+    """
+    return (
+        "pytest" in sys.modules
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+        or bool(os.environ.get("PYTEST_VERSION"))
+        or bool(os.environ.get("HERMES_TEST_ISOLATION"))
+    )
+
+
 def _get_process_hermes_home() -> Path:
     """Return the process-level HERMES_HOME, skipping context-local overrides.
 
@@ -138,10 +168,25 @@ def _get_process_hermes_home() -> Path:
     per-session profile dispatch, which would route these files into the wrong
     profile directory when a profile-context task happens to be active at write
     time.  See issue #56986.
+
+    Under pytest with HERMES_HOME wiped, this returns a throwaway directory
+    rather than the platform default.  The platform default IS the operator's
+    live ~/.hermes: ``test_connect_websocket_sets_channel_ua_tag`` reached it
+    through a ``clear=True`` environ patch and wrote the running gateway's
+    ``gateway_state.json``, leaving a phantom ``feishu: connected`` platform
+    entry that survived gateway restarts.  Production behaviour is unchanged —
+    neither pytest signal is ever true outside a test run.
     """
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
         return Path(val)
+    if _running_under_pytest():
+        global _PYTEST_FALLBACK_HERMES_HOME
+        if _PYTEST_FALLBACK_HERMES_HOME is None:
+            _PYTEST_FALLBACK_HERMES_HOME = Path(
+                tempfile.mkdtemp(prefix="hermes-pytest-home-")
+            )
+        return _PYTEST_FALLBACK_HERMES_HOME
     return _get_platform_default_hermes_home()
 
 
