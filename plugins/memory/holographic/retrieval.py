@@ -304,9 +304,9 @@ def _env_float(name: str, default: float) -> float:
 # The same unanswerable question asked two ways, against the same corpus and
 # the same top hit (fid 1202):
 #
-#   "Is fail2ban (or anything like it) running on pdsrv, and what jail
+#   "Is fail2ban (or anything like it) running on server-a, and what jail
 #    settings — bantime, findtime, maxretry — does it apply to SSH logins?"   0.023  -> abstains
-#   "Is fail2ban running on pdsrv and what are its jail settings"             0.164  -> does not
+#   "Is fail2ban running on server-a and what are its jail settings"          0.164  -> does not
 #
 # A vague query is a loose target, so a merely-adjacent fact clears it. The
 # probe set is written in long, specific questions, so the floor is calibrated
@@ -358,7 +358,7 @@ _ENTAIL_SHAPE = "lexical"
 
 # The judge is asked "do these facts ANSWER the question?", so it may only be
 # shown something that IS a question. A bare noun phrase has no answer, and the
-# model correctly says so: measured 8 of 8 bare entity names ("CubeOH",
+# model correctly says so: measured 8 of 8 bare entity names ("ProjectAlpha",
 # "LightRAG", "R9700", ...) abstaining with 8 good rows returned and top_ce
 # 0.987-1.000. That query form is not an edge case — it is what
 # consolidate-synthesize STEP 1(b) issues all night, and what about()/probe()

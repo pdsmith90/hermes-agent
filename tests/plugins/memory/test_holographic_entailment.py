@@ -262,7 +262,7 @@ class TestQueryForm:
         return calls
 
     @pytest.mark.parametrize("query", [
-        "LightRAG", "CubeOH", "R9700", "qwen35-4b-util",
+        "LightRAG", "ProjectAlpha", "R9700", "qwen35-4b-util",
         "llama-swap reranker", "memory dense lane abstention gate",
     ])
     def test_bare_entity_queries_are_never_judged(self, says_no, query):
@@ -272,7 +272,7 @@ class TestQueryForm:
     @pytest.mark.parametrize("query", [
         "What MMLU and GPQA scores did qwen36-27b-cron get in our battery?",
         "How worn is the NVMe drive that holds the GGUF model files?",
-        "does the pdrag reranker fit on the GPU or not, and why",
+        "does the server-b reranker fit on the GPU or not, and why",
     ])
     def test_real_questions_are_still_judged(self, says_no, query):
         v = no_entailed_answer(query, ROWS, META)
