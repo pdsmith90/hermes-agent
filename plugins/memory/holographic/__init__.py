@@ -26,6 +26,43 @@ from agent.memory_provider import MemoryProvider
 from tools.registry import tool_error
 from utils import is_truthy_value
 from .store import MemoryStore
+from .store import _SUPERSESSION_RE
+
+# DELIBERATELY LOOSER than _SUPERSESSION_RE, which is the thing that actually
+# demotes. This one only asks "does this body READ like a retraction?", so that
+# a phrasing the strict regex rejects can be reported instead of passing
+# silently. It must match the near-misses in particular: the plural "fids"
+# (matches nothing), the passive "superseded by fid N" (names the wrong fact),
+# and a target that is not older. Any verb from the strict set, in any
+# inflection, within a short distance of fid/fids.
+_RETRACTION_CLAIM_RE = re.compile(
+    r"\b(?:supersed\w*|correct\w*|refut\w*|invalidat\w*|obsolet\w*|retract\w*)"
+    r"[^.\n]{0,40}?\bfids?\b",
+    re.IGNORECASE,
+)
+# Every fid-number inside a retraction claim, however it is punctuated. Diffing
+# this against _SUPERSESSION_RE's captures is what catches the PARTIAL match —
+# "corrects fid 886 and fid 896" demotes 886 and drops 896, and a caller
+# looking only at "did anything get superseded" sees success.
+_CLAIMED_FID_RE = re.compile(r"\bfids?\b[\s=:#,and]*(\d{1,7})", re.IGNORECASE)
+
+
+def _retraction_targets(text: str) -> "tuple[set, set]":
+    """(fids the prose NAMES as retracted, fids the store's regex will match).
+
+    The first is deliberately generous and the second is the real thing, so
+    `named - matched` is exactly the set that will be silently dropped.
+    """
+    if not _RETRACTION_CLAIM_RE.search(text or ""):
+        return set(), set()
+    named = set()
+    for m in _RETRACTION_CLAIM_RE.finditer(text):
+        # The claim plus a short tail, so "fids 886, 896" and "fid 886 and fid
+        # 896" are both covered without swallowing the rest of the paragraph.
+        span = text[m.start():m.end() + 60]
+        named |= {int(n) for n in _CLAIMED_FID_RE.findall(span)}
+    matched = {int(n) for n in _SUPERSESSION_RE.findall(text or "")}
+    return named, matched
 from .retrieval import (
     FactRetriever,
     no_confident_match,
@@ -304,7 +341,8 @@ def _verdict_category_refusal(existing: dict, args: dict):
     return None
 
 
-def _update_result(fid: int, updated: bool, before: dict, after: dict) -> dict:
+def _update_result(fid: int, updated: bool, before: dict, after: dict,
+                   supersedes: "list | None" = None) -> dict:
     """Build the action='update' result so a no-op is visible to the caller.
 
     ``update_fact`` changes only the fields passed and returns True whenever
@@ -332,6 +370,43 @@ def _update_result(fid: int, updated: bool, before: dict, after: dict) -> dict:
         "tags": after.get("tags"),
         "trust_score": after.get("trust_score"),
     }
+    # Did a retraction sentence in the body actually retract anything? A
+    # supersession that matched nothing is otherwise indistinguishable from one
+    # that worked — same "updated": true, same "changed": ["content"] — and the
+    # three ways to write one that parses to nothing (the plural "fids", the
+    # passive voice, naming a fact newer than this one) are all silent. Say so
+    # explicitly rather than leaving the caller to infer it.
+    if supersedes is not None:
+        text = str(after.get("content") or "")
+        named, matched = _retraction_targets(text)
+        dropped = sorted(named - matched)
+        if supersedes:
+            result["supersedes"] = supersedes
+            if dropped:
+                # PARTIAL match: something was retracted, so "did it work?"
+                # looks like yes. Name the ones that were not.
+                result["supersedes_dropped"] = dropped
+                result["note"] = (
+                    f"PARTIAL: fid(s) {dropped} are named as retracted but were "
+                    f"NOT matched — nothing was demoted for them and no validity "
+                    f"window was closed. The store's regex needs a SINGULAR "
+                    f"\"fid\" immediately before each number, so repeat the whole "
+                    f"phrase per target: \"corrects fid A; corrects fid B\". "
+                    f"\"corrects fid A and fid B\" matches only A, and \"corrects "
+                    f"fids A, B\" matches neither."
+                )
+        elif named:
+            result["supersedes"] = []
+            result["note"] = (
+                "This body reads like a retraction but the store matched NO fid, "
+                "so nothing was demoted and no validity window was closed. The "
+                "phrase must be ACTIVE VOICE, SINGULAR, and name an OLDER fid: "
+                "\"corrects fid 886\" works; \"corrects fids 886, 896\" matches "
+                "nothing; \"corrects fid 886 and fid 896\" matches only 886; "
+                "\"superseded by fid N\" names the newer fact and is ignored; a "
+                "fid greater than or equal to this one is refused. Repeat the "
+                "whole phrase per target."
+            )
     if updated and not changed:
         result["note"] = (
             "no-op: nothing differed from the stored row. An update changes only "
@@ -693,7 +768,10 @@ class HolographicMemoryProvider(MemoryProvider):
                     changed_by=getattr(self, "_session_id", "") or "",
                 )
                 after = store.get_fact(fid) or before
-                return json.dumps(_update_result(fid, updated, before, after))
+                return json.dumps(_update_result(
+                    fid, updated, before, after,
+                    supersedes=store.supersedes(fid) if args.get("content") else None,
+                ))
 
             elif action == "remove":
                 fid = int(args["fact_id"])

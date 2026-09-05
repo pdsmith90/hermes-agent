@@ -698,3 +698,112 @@ class TestSupersessionOnTheUpdatePath:
         )
         assert store.get_fact(first)["valid_until"] is None
         assert store.get_fact(second)["valid_until"] is None
+
+
+class TestSupersessionFloorIsAFloor:
+    """_SUPERSESSION_FLOOR must STOP the crossing, not notice it afterwards.
+
+    The old guard ran before each step and never after, so it caught a row
+    that had ALREADY crossed. Every loser in the open interval (0.30, 0.50)
+    landed below the 0.30 search floor — where the row still exists but no
+    default search returns it, which is the unreachable state the demotion
+    exists to avoid. 17 live facts sat in that interval.
+    """
+
+    @pytest.mark.parametrize("start", [0.90, 0.70, 0.50, 0.45, 0.39, 0.35, 0.31])
+    def test_a_retraction_never_lands_below_the_floor(self, store, start):
+        from plugins.memory.holographic.store import _SUPERSESSION_FLOOR
+
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        store._conn.execute(
+            "UPDATE facts SET trust_score = ? WHERE fact_id = ?", (start, old)
+        )
+        store._conn.commit()
+        store.add_fact(f"LESSON: it runs on the GPU — corrects fid {old}.")
+        row = store.get_fact(old)
+        assert row["trust_score"] >= _SUPERSESSION_FLOOR - 1e-9, (
+            f"{start} -> {row['trust_score']} punched through the floor"
+        )
+        assert row["valid_until"] is not None
+
+    def test_a_row_already_under_the_floor_is_not_raised(self, store):
+        """It is a demotion limit, not a promotion."""
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        store._conn.execute(
+            "UPDATE facts SET trust_score = 0.20 WHERE fact_id = ?", (old,)
+        )
+        store._conn.commit()
+        store.add_fact(f"LESSON: it runs on the GPU — corrects fid {old}.")
+        assert store.get_fact(old)["trust_score"] == pytest.approx(0.20)
+
+    def test_two_full_steps_still_happen_when_there_is_room(self, store):
+        old = store.add_fact("LESSON: the reranker runs on the CPU.")
+        store._conn.execute(
+            "UPDATE facts SET trust_score = 0.90 WHERE fact_id = ?", (old,)
+        )
+        store._conn.commit()
+        store.add_fact(f"LESSON: it runs on the GPU — corrects fid {old}.")
+        assert store.get_fact(old)["trust_score"] == pytest.approx(0.70)
+
+
+class TestSupersessionIsReportedToTheCaller:
+    """A retraction that matched NOTHING must not look like one that worked.
+
+    add_fact returns a fact_id either way and update_fact returns True either
+    way, so a model told to write "corrects fid N" had no way to learn it had
+    written the plural, the passive voice, or a fid that is not older.
+    """
+
+    def _door(self, store, fid, body):
+        from plugins.memory.holographic import _update_result
+
+        before = store.get_fact(fid)
+        ok = store.update_fact(fid, content=body)
+        return _update_result(fid, ok, before, store.get_fact(fid) or before,
+                              supersedes=store.supersedes(fid))
+
+    @pytest.fixture
+    def trio(self, store):
+        a = store.add_fact("LESSON: alpha, the reranker runs on the CPU.")
+        b = store.add_fact("LESSON: beta, a separate claim about the embedder.")
+        w = store.add_fact("LESSON: gamma, the winning fact.")
+        return a, b, w
+
+    def test_a_working_retraction_names_what_it_retracted(self, store, trio):
+        a, _b, w = trio
+        r = self._door(store, w, f"LESSON: gamma v2. Corrects fid {a}.")
+        assert r["supersedes"] == [a]
+        assert "note" not in r
+
+    def test_the_correct_multi_target_form_reports_both(self, store, trio):
+        a, b, w = trio
+        r = self._door(
+            store, w, f"LESSON: gamma v2. Corrects fid {a}; corrects fid {b}.")
+        assert r["supersedes"] == sorted([a, b])
+        assert "note" not in r
+
+    def test_the_conjunction_form_reports_the_DROPPED_target(self, store, trio):
+        """The dangerous one: A is retracted, so "did it work" says yes."""
+        a, b, w = trio
+        r = self._door(
+            store, w, f"LESSON: gamma v2. Corrects fid {a} and fid {b}.")
+        assert r["supersedes"] == [a]
+        assert r["supersedes_dropped"] == [b]
+        assert r["note"].startswith("PARTIAL")
+
+    @pytest.mark.parametrize("body", [
+        "LESSON: gamma v2. Corrects fids {a}, {b}.",      # plural: matches nothing
+        "LESSON: gamma v2 (superseded by fid {w}).",       # passive: wrong direction
+        "LESSON: gamma v2. Corrects fid 99999.",           # not older
+    ])
+    def test_a_retraction_that_matched_nothing_is_flagged(self, store, trio, body):
+        a, b, w = trio
+        r = self._door(store, w, body.format(a=a, b=b, w=w + 50))
+        assert r["supersedes"] == []
+        assert "note" in r and "NO fid" in r["note"]
+
+    def test_an_ordinary_edit_says_nothing_about_supersession(self, store, trio):
+        _a, _b, w = trio
+        r = self._door(store, w, "LESSON: gamma v2, an ordinary edit.")
+        assert "supersedes" not in r
+        assert "note" not in r

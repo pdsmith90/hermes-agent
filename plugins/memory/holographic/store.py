@@ -910,17 +910,50 @@ class MemoryStore:
                     target, fact_id, exc_info=True,
                 )
             try:
-                # Bounded: at most two steps of _UNHELPFUL_DELTA per retraction,
-                # so one write can never sink a row further than 0.50 -> 0.30.
+                # Bounded: at most two steps of _UNHELPFUL_DELTA per retraction.
+                #
+                # _SUPERSESSION_FLOOR IS A FLOOR, NOT ONLY A LOOP GUARD. The
+                # old test ran BEFORE each step and never after, so it stopped
+                # a row that had ALREADY crossed instead of stopping the
+                # crossing: any loser in the open interval (0.30, 0.50) landed
+                # below the floor, and 0.50 exactly was the single value that
+                # came to rest on it. 0.45 -> 0.25, 0.35 -> 0.25, 0.31 -> 0.21.
+                # Anything under 0.30 is invisible to every default search
+                # (min_trust is a hard SQL predicate), so a correct retraction
+                # was silently making its target unreachable rather than
+                # merely outranked — the exact state the demotion exists to
+                # avoid, since the supersession probes need BOTH generations
+                # retrievable. 17 live facts sat in that interval.
+                #
+                # Reachability rose sharply the same day: until 2026-09-04 this
+                # hook fired only from add_fact, and it now fires from
+                # update_fact too.
                 for _ in range(2):
                     row = self._conn.execute(
                         "SELECT trust_score FROM facts WHERE fact_id = ?", (target,)
                     ).fetchone()
+                    if row is None:
+                        break
+                    current = float(row["trust_score"])
                     # Epsilon, not a bare <=. Repeated -0.10 steps land on
                     # 0.30000000000000004, which compares GREATER than 0.30, so
-                    # a bare test lets the next retraction punch through the
-                    # floor to 0.20 and hide the row from default search.
-                    if row is None or row["trust_score"] <= _SUPERSESSION_FLOOR + 1e-9:
+                    # a bare test lets the next retraction punch through.
+                    if current <= _SUPERSESSION_FLOOR + 1e-9:
+                        break
+                    if current + _UNHELPFUL_DELTA < _SUPERSESSION_FLOOR - 1e-9:
+                        # A full step would undershoot: land exactly ON the
+                        # floor instead. update_fact rather than record_feedback
+                        # because only it can apply an arbitrary delta, and it
+                        # snapshots into fact_history the same way. It cannot
+                        # recurse into this function — content is None here, and
+                        # the update path's hook is gated on a content change.
+                        self.update_fact(
+                            target,
+                            trust_delta=_SUPERSESSION_FLOOR - current,
+                            changed_by=(f"auto-supersession: floor clamp, "
+                                        f"retracted by fid {fact_id}"),
+                        )
+                        demoted.append(target)
                         break
                     self.record_feedback(
                         target, helpful=False,
@@ -933,6 +966,26 @@ class MemoryStore:
                     target, fact_id, exc_info=True,
                 )
         return demoted
+
+    def supersedes(self, fact_id: int) -> list:
+        """The fids this fact has actually retracted, per the STORE.
+
+        Exists so a caller can tell a supersession that WORKED from one that
+        silently matched nothing. The two are otherwise identical: add_fact
+        returns a fact_id either way, update_fact returns True either way, and
+        _demote_superseded's return value is discarded at both call sites. A
+        model told to write "corrects fid N" therefore had no way to learn that
+        it had written the plural "fids", or the passive voice, or named a
+        newer fact — all three of which parse to nothing.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT fact_id FROM facts WHERE superseded_by = ? ORDER BY fact_id",
+                (int(fact_id),),
+            ).fetchall()
+        except sqlite3.OperationalError:                     # pragma: no cover
+            return []                                        # pre-migration store
+        return [int(r["fact_id"]) for r in rows]
 
     def invalidate_fact(self, fact_id: int, superseded_by: int) -> bool:
         """Close *fact_id*'s validity window at the moment *superseded_by* was written.
