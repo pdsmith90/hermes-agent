@@ -800,6 +800,53 @@ def _is_cron_silence_response(text: str) -> bool:
 
     return is_autonomous_silence_response(text)
 
+def _normalize_report_text(text: str) -> str:
+    """Lower-case, collapse whitespace and fold every dash to "-", so a marker
+    written "Research —" also matches "Research – 2026-…" and "Research - …"."""
+    text = (text or "").replace("\u2014", "-").replace("\u2013", "-")
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _report_gate_missing_marker(job: dict, final_response: str) -> Optional[str]:
+    """Return the job's ``report_marker`` when the final response is not the report.
+
+    A cron run ends on the first text turn that carries no tool call, whatever
+    that text says. On 2026-09-06 experiment-design ended 25 minutes of real
+    work on "Let me check what's happening and fix all four facts" (141 chars,
+    no report), and doc-paper-ingest ended on a self-assessment essay after
+    reading three papers and storing nothing (incidents #42 and #43 in
+    scripts/cron-prompt-incident-log.md). Every prompt mandates a report
+    header; ``report_marker`` names it, and ``run_job`` grants ONE follow-up
+    turn when it is absent. Checked over the WHOLE response, not the first
+    line: legitimate reports routinely open with a sentence of narration.
+    Silence sentinels bypass the gate — a quiet night is a valid final message.
+    """
+    marker = str(job.get("report_marker") or "").strip()
+    if not marker or job.get("no_agent"):
+        return None
+    text = (final_response or "").strip()
+    if not text or _is_cron_silence_response(text):
+        return None
+    if _normalize_report_text(marker) in _normalize_report_text(text):
+        return None
+    return marker
+
+
+#: Wall-clock cap on the follow-up turn. The first turn is guarded by the
+#: inactivity watchdog; the follow-up is one bounded continuation.
+_REPORT_GATE_TIMEOUT_S = 600.0
+
+
+def _report_gate_follow_up(marker: str) -> str:
+    return (
+        f"REPORT GATE: your last message was not the report — it does not contain "
+        f"\"{marker}\". A text turn with no tool call ends this run, so nothing after "
+        f"it will happen. If work remains, do it NOW with tool calls; then produce "
+        f"the complete final report as plain text, starting with the mandated "
+        f"header \"{marker} …\". Do not explain this message."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Persistent thread pool for parallel cron jobs.
 # The tick function submits jobs here and returns immediately so the ticker
@@ -7245,6 +7292,70 @@ def run_job(
                     turn_exit_reason,
                 )
                 final_response = ""
+        # REPORT GATE (2026-09-06): one follow-up turn when the final text is
+        # not the report — see _report_gate_missing_marker. Only
+        # ``final_response`` is replaced; ``result`` stays the first turn's
+        # so the usage audit below keeps its accounting. The follow-up runs
+        # in the same session (conversation_history carried over), so the
+        # scheduler's fact-write ledger sees anything it writes.
+        _gate_note = ""
+        _gate_marker = _report_gate_missing_marker(job, final_response)
+        if _gate_marker:
+            logger.warning(
+                "Job '%s': final response lacks report marker %r (%d chars) "
+                "— granting one follow-up turn",
+                job_name, _gate_marker, len(final_response),
+            )
+            _second = None
+            _gate_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            try:
+                _gate_future = _gate_pool.submit(
+                    _cron_context.run,
+                    agent.run_conversation,
+                    _report_gate_follow_up(_gate_marker),
+                    conversation_history=result.get("messages") or None,
+                    task_id=_cron_task_id,
+                )
+                _second = _gate_future.result(timeout=_REPORT_GATE_TIMEOUT_S)
+            except concurrent.futures.TimeoutError:
+                request_hard_interrupt(agent, "Cron report-gate follow-up timed out")
+                _gate_note = (
+                    f"fired (marker \"{_gate_marker}\" missing); the follow-up timed "
+                    f"out after {int(_REPORT_GATE_TIMEOUT_S)}s — first response kept"
+                )
+            except Exception as _gate_exc:  # noqa: BLE001 — never take the run down
+                logger.warning("Job '%s': report-gate follow-up failed: %s",
+                               job_name, _gate_exc)
+                _gate_note = (
+                    f"fired (marker \"{_gate_marker}\" missing); the follow-up failed "
+                    f"({type(_gate_exc).__name__}) — first response kept"
+                )
+            finally:
+                _gate_pool.shutdown(wait=False, cancel_futures=True)
+            _second_text = ""
+            if isinstance(_second, dict) and _second.get("failed") is not True:
+                _second_text = str(_second.get("final_response") or "").strip()
+                if _second_text == "(No response generated)":
+                    _second_text = ""
+            if _second_text:
+                final_response = _second_text
+                if _report_gate_missing_marker(job, final_response):
+                    _gate_note = (
+                        f"fired (marker \"{_gate_marker}\" missing after turn 1); "
+                        f"still missing after the follow-up — delivering it anyway"
+                    )
+                else:
+                    _gate_note = (
+                        f"fired (marker \"{_gate_marker}\" missing after turn 1); "
+                        f"the follow-up produced the report"
+                    )
+            elif not _gate_note:
+                _gate_note = (
+                    f"fired (marker \"{_gate_marker}\" missing); the follow-up "
+                    f"returned nothing — first response kept"
+                )
+            logger.info("Job '%s': report gate %s", job_name, _gate_note)
+        _gate_line = f"\n**Report gate:** {_gate_note}" if _gate_note else ""
         # Use a separate variable for log display; keep final_response clean
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
@@ -7258,7 +7369,7 @@ def run_job(
 
 **Job ID:** {job_id}
 **Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}
-**Schedule:** {job.get('schedule_display', 'N/A')}
+**Schedule:** {job.get('schedule_display', 'N/A')}{_gate_line}
 {_fact_write_ledger(_cron_session_id, _memfile_before)}
 ## Prompt
 

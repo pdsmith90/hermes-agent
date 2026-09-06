@@ -712,6 +712,24 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
             "Agent cannot modify security-sensitive configuration. "
             "Edit ~/.hermes/config.yaml directly or use 'hermes config' instead."
         )
+    # Prevent agents from rewriting the rig's own cron schedule through the
+    # file tools. ``approvals.deny`` closes the TERMINAL route into
+    # cron/jobs.json, but read_file/write_file/patch never consulted it, and the
+    # scheduler re-reads jobs.json every tick — so a prompt-injected write_file
+    # would recreate the 2026-08-13 incident (a cron run created two live jobs
+    # for itself) with no guard at all. The whole cron/ tree is refused: the
+    # cronjob tool is the API for schedule changes, and nothing legitimate
+    # writes executions.db, the fire locks or the output files through the
+    # agent's file tools.
+    real_home = _get_real_hermes_home()
+    if real_home:
+        cron_dir = os.path.join(real_home, "cron") + os.sep
+        if resolved.startswith(cron_dir) or normalized.startswith(cron_dir):
+            return (
+                f"Refusing to write inside the Hermes cron directory: {filepath}\n"
+                "Schedule changes go through the cronjob tool; the agent cannot "
+                "edit cron/jobs.json or the scheduler's state through file tools."
+            )
     return None
 
 

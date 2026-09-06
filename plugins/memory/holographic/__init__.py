@@ -27,6 +27,7 @@ from tools.registry import tool_error
 from utils import is_truthy_value
 from .store import MemoryStore
 from .store import _SUPERSESSION_RE
+from .store import CROSS_JOB_MARKERS, _split_tags
 
 # DELIBERATELY LOOSER than _SUPERSESSION_RE, which is the thing that actually
 # demotes. This one only asks "does this body READ like a retraction?", so that
@@ -342,7 +343,8 @@ def _verdict_category_refusal(existing: dict, args: dict):
 
 
 def _update_result(fid: int, updated: bool, before: dict, after: dict,
-                   supersedes: "list | None" = None) -> dict:
+                   supersedes: "list | None" = None,
+                   requested_tags: "str | None" = None) -> dict:
     """Build the action='update' result so a no-op is visible to the caller.
 
     ``update_fact`` changes only the fields passed and returns True whenever
@@ -414,6 +416,32 @@ def _update_result(fid: int, updated: bool, before: dict, after: dict,
             "replacement list>; to change category, pass category=. Do not "
             "re-send this call unchanged."
         )
+    # Store-managed markers the caller's tags string omitted and the store put
+    # back (fact_markers full-replace protection, store.py). Without this line
+    # the result reads like a tags write that half-failed: on 2026-09-06
+    # experiment-design saw `needs-experiment` still present after its update,
+    # spent five calls trying to strip it, and ended the run on a text turn
+    # with no report (incident #42). Consolidate, daily-review and research
+    # have each dropped a marker the same way; every one was silently restored.
+    if updated and requested_tags is not None:
+        asked = set(_split_tags(requested_tags))
+        kept = sorted(
+            m for m in _split_tags(after.get("tags") or "")
+            if m in CROSS_JOB_MARKERS and m not in asked
+        )
+        if kept:
+            result["markers_kept"] = kept
+            marker_note = (
+                f"store-managed marker(s) {kept} were KEPT although your tags "
+                f"string omitted them: markers such as needs-experiment, designed, "
+                f"retired-experiment, blocked-local, promoted and deep-dived are "
+                f"re-applied to every tags write and are retired only by the job "
+                f"that owns them. This is not an error — the tags you passed were "
+                f"stored, plus these. Do not re-send the update to remove them."
+            )
+            result["note"] = (
+                f"{result['note']} {marker_note}" if result.get("note") else marker_note
+            )
     return result
 
 
@@ -771,6 +799,7 @@ class HolographicMemoryProvider(MemoryProvider):
                 return json.dumps(_update_result(
                     fid, updated, before, after,
                     supersedes=store.supersedes(fid) if args.get("content") else None,
+                    requested_tags=args.get("tags"),
                 ))
 
             elif action == "remove":
