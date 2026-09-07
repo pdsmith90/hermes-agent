@@ -63,9 +63,7 @@ _SSHD_CONFIG_PATHS = (
 _SSHD_CONFIG_DIR = "/etc/ssh/sshd_config.d"
 
 
-def _iter_sshd_config_lines() -> list[str]:
-    """Yield non-comment lines from sshd_config + its drop-in directory."""
-    lines: list[str] = []
+def _sshd_config_paths() -> list[Path]:
     paths: list[Path] = [Path(p) for p in _SSHD_CONFIG_PATHS]
     try:
         d = Path(_SSHD_CONFIG_DIR)
@@ -73,7 +71,19 @@ def _iter_sshd_config_lines() -> list[str]:
             paths.extend(sorted(d.glob("*.conf")))
     except Exception:
         pass
-    for p in paths:
+    return paths
+
+
+def _sshd_config_unreadable() -> list[str]:
+    """Config files that exist but this process cannot read (e.g. a 0600 root drop-in)."""
+    return [str(p) for p in _sshd_config_paths()
+            if p.is_file() and not os.access(p, os.R_OK)]
+
+
+def _iter_sshd_config_lines() -> list[str]:
+    """Yield non-comment lines from sshd_config + its drop-in directory."""
+    lines: list[str] = []
+    for p in _sshd_config_paths():
         try:
             for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
                 stripped = raw.strip()
@@ -103,6 +113,10 @@ def _ssh_password_auth_enabled() -> Optional[str]:
             verdict = m.group(1).lower()
             saw_directive = True
     if verdict == "no":
+        return None
+    if not saw_directive and _sshd_config_unreadable():
+        # The directive may live in a file we cannot read (a root-only drop-in);
+        # asserting "enabled by default" would be a guess, so say nothing.
         return None
     qualifier = "" if saw_directive else " (default — no explicit directive)"
     return (

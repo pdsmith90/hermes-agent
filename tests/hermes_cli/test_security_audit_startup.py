@@ -25,6 +25,21 @@ def _reset_audit_sentinel():
 # ── SSH password-auth check ─────────────────────────────────────────────────
 
 
+def test_ssh_password_auth_silent_when_a_config_file_is_unreadable(monkeypatch):
+    # No directive visible, but a drop-in exists that we cannot read: the
+    # directive may be in there, so "enabled by default" is not a finding.
+    monkeypatch.setattr(audit, "_iter_sshd_config_lines", lambda: ["UsePAM yes"])
+    monkeypatch.setattr(audit, "_sshd_config_unreadable",
+                        lambda: ["/etc/ssh/sshd_config.d/10-hardening.conf"])
+    assert audit._ssh_password_auth_enabled() is None
+
+
+def test_ssh_password_auth_default_warns_when_everything_readable(monkeypatch):
+    monkeypatch.setattr(audit, "_iter_sshd_config_lines", lambda: ["UsePAM yes"])
+    monkeypatch.setattr(audit, "_sshd_config_unreadable", lambda: [])
+    assert "no explicit directive" in audit._ssh_password_auth_enabled()
+
+
 # ── container / volume-mount check ──────────────────────────────────────────
 
 
