@@ -832,6 +832,34 @@ def _report_gate_missing_marker(job: dict, final_response: str) -> Optional[str]
     return marker
 
 
+def _strip_report_preamble(job: dict, text: str) -> str:
+    """Return ``text`` from its report header down, for delivery.
+
+    The report gate accepts a header anywhere in the body because real reports
+    routinely open with a line or two of narration ("All 13 files read, ledgers
+    cross-checked. Writing the briefing now."). That narration is worthless on
+    the phone: the 2026-09-11 morning briefing and the 2026-09-12 daily trace
+    mining both shipped a working-notes paragraph above their headers. This
+    trims the delivered copy only — the cron output file keeps the full
+    response. A line that STARTS with the marker (after markdown decoration)
+    wins over one that merely mentions it, so "Writing the Morning Briefing
+    now." does not become the cut point when the real header follows.
+    """
+    marker = str(job.get("report_marker") or "").strip()
+    body = text or ""
+    if not marker or job.get("no_agent") or _is_cron_silence_response(body):
+        return body
+    norm_marker = _normalize_report_text(marker)
+    lines = body.splitlines(keepends=True)
+    normalized = [_normalize_report_text(line.lstrip("#*_> \t")) for line in lines]
+    start = next((i for i, n in enumerate(normalized) if n.startswith(norm_marker)), None)
+    if start is None:
+        start = next((i for i, n in enumerate(normalized) if norm_marker in n), None)
+    if not start:
+        return body
+    return "".join(lines[start:])
+
+
 #: Wall-clock cap on the follow-up turn. The first turn is guarded by the
 #: inactivity watchdog; the follow-up is one bounded continuation.
 _REPORT_GATE_TIMEOUT_S = 600.0
@@ -8034,7 +8062,7 @@ def _run_one_job_body(
                 )
             else:
                 if success:
-                    deliver_content = final_response
+                    deliver_content = _strip_report_preamble(job, final_response)
                 else:
                     # Durable failure incident: record this job+error
                     # signature once and, when the operator already acked it,
