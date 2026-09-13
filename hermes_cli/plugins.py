@@ -2010,8 +2010,15 @@ class PluginContext:
 
     # -- override trust gate ------------------------------------------------
 
-    def _tool_override_allowed(self, tool_name: str) -> bool:
+    def _tool_override_allowed(self, tool_name: str, *, audit: bool = True) -> bool:
         """Return True if this plugin is configured to override built-in tools.
+
+        ``audit=False`` is for the speculative load-time policy probe only (see
+        the ``register_plugin_override_policy`` call site): it asks whether an
+        override WOULD be permitted so the answer can be cached, without a
+        plugin having attempted one. The gate result is identical either way —
+        only the ``capability_check`` audit line is withheld, so a genuine
+        refusal at the ``register_tool`` enforcement site still leaves a record.
 
         Bundled plugins (shipped with Hermes core) are trusted by default —
         an override there is a deliberate maintainer choice, not a third-party
@@ -2039,7 +2046,9 @@ class PluginContext:
         # inside plugin_capability_granted returns False. The profile-scoped
         # config is passed through so a multi-profile process consults THIS
         # manager's home, never the active profile's (#65593 constraint).
-        return plugin_capability_granted(plugin_id, "tools.override", config=cfg)
+        return plugin_capability_granted(
+            plugin_id, "tools.override", config=cfg, audit=audit
+        )
 
     # -- message injection --------------------------------------------------
 
@@ -5253,7 +5262,11 @@ class PluginManager:
             )
             current_policy = _registry.register_plugin_override_policy(
                 _module_name,
-                PluginContext(manifest, self)._tool_override_allowed(""),
+                # Speculative: caches the policy at load time for EVERY plugin,
+                # whether or not it ever overrides a tool. audit=False keeps this
+                # routine bookkeeping out of the capability_check audit trail so a
+                # real denied override (register_tool) stays visible in it.
+                PluginContext(manifest, self)._tool_override_allowed("", audit=False),
                 scope=self.scope_key,
             )
             policy_lease = replacement_coordinator.acquire(

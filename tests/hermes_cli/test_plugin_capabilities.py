@@ -7,6 +7,7 @@ and backward compatibility with the legacy ``allow_*`` gates.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -354,6 +355,89 @@ class TestLegacyGateCompat:
         ctx = PluginContext(manifest, PluginManager())
         assert ctx._tool_override_allowed("write_file") is True
         assert ctx.has_capability("tools.override") is True
+
+
+# ── Audit-line suppression for speculative probes ────────────────────────────
+
+
+class TestAuditSuppression:
+    """``audit=False`` withholds the log line WITHOUT changing the decision.
+
+    The loader probes ``tools.override`` once per plugin per load just to cache
+    an override policy. That probe used to emit a ``decision=deny`` audit line
+    identical to a plugin actually being refused an override, burying real
+    denials in routine bookkeeping.
+    """
+
+    LOGGER = "hermes_cli.plugin_capabilities"
+
+    def _capability_lines(self, caplog):
+        return [r for r in caplog.records if "capability_check" in r.getMessage()]
+
+    def test_probe_emits_no_audit_line(self, caplog, hermes_home):
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            assert plugin_capability_granted(
+                "capplug", "tools.override", audit=False
+            ) is False
+        assert self._capability_lines(caplog) == []
+
+    def test_enforcement_still_logs_denial(self, caplog, hermes_home):
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            assert plugin_capability_granted("capplug", "tools.override") is False
+        lines = self._capability_lines(caplog)
+        assert len(lines) == 1
+        assert "decision=deny" in lines[0].getMessage()
+
+    def test_granted_path_also_suppressible(self, caplog, hermes_home):
+        record_consent("capplug", ["tools.override"], ["tools.override"])
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            assert plugin_capability_granted(
+                "capplug", "tools.override", audit=False
+            ) is True
+        assert self._capability_lines(caplog) == []
+
+    def test_legacy_path_also_suppressible(self, caplog, hermes_home):
+        (hermes_home / "config.yaml").write_text(
+            "plugins:\n  entries:\n    oldplug:\n"
+            "      allow_tool_override: true\n",
+            encoding="utf-8",
+        )
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            assert plugin_capability_granted(
+                "oldplug", "tools.override", audit=False
+            ) is True
+        assert self._capability_lines(caplog) == []
+
+    @pytest.mark.parametrize("granted", [True, False])
+    def test_decision_identical_regardless_of_audit(self, hermes_home, granted):
+        """The gate must not become more permissive when the line is withheld."""
+        if granted:
+            record_consent("capplug", ["tools.override"], ["tools.override"])
+        loud = plugin_capability_granted("capplug", "tools.override")
+        quiet = plugin_capability_granted("capplug", "tools.override", audit=False)
+        assert loud is quiet is granted
+
+    def test_tool_override_probe_silent_but_enforcement_loud(
+        self, caplog, hermes_home
+    ):
+        """The two call sites on PluginContext behave differently, by design."""
+        from hermes_cli.plugins import PluginContext, PluginManifest, PluginManager
+
+        manifest = PluginManifest(name="capplug", source="user", key="capplug")
+        ctx = PluginContext(manifest, PluginManager())
+
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            # Load-time policy probe — empty tool name, no plugin attempted it.
+            assert ctx._tool_override_allowed("", audit=False) is False
+        assert self._capability_lines(caplog) == []
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=self.LOGGER):
+            # Real enforcement path: a plugin tried to override write_file.
+            assert ctx._tool_override_allowed("write_file") is False
+        lines = self._capability_lines(caplog)
+        assert len(lines) == 1
+        assert "decision=deny" in lines[0].getMessage()
 
 
 # ── ctx.has_capability probing ───────────────────────────────────────────────

@@ -234,6 +234,8 @@ def plugin_capability_granted(
     plugin_id: str,
     capability: str,
     config: Optional[Mapping[str, Any]] = None,
+    *,
+    audit: bool = True,
 ) -> bool:
     """Canonical check: is *capability* live for *plugin_id*?
 
@@ -245,6 +247,19 @@ def plugin_capability_granted(
 
     Unknown capability ids and any failure to read state return ``False``
     (ground rule 4: fail closed).
+
+    ``audit=False`` suppresses the ``capability_check`` audit line for
+    *speculative* callers — those asking "would this be allowed?" to cache a
+    policy, not because a plugin actually attempted the privileged action.
+    The decision itself is unchanged; only the log line is withheld.
+
+    WHY this exists: the plugin loader probes ``tools.override`` once per
+    plugin per load purely to register an override policy, and that probe wrote
+    a ``decision=deny`` line indistinguishable from a plugin genuinely being
+    refused a privileged override. Every install pays that once per plugin per
+    load, burying genuine denials in routine bookkeeping — which is exactly how
+    an audit trail stops being read. Enforcement sites MUST keep the default
+    ``audit=True`` — a real refusal has to leave a record.
     """
     spec = CAPABILITY_REGISTRY.get(capability)
     if spec is None:
@@ -255,15 +270,18 @@ def plugin_capability_granted(
         return False
     entry = _plugin_entry(plugin_id, config)
     if capability in granted_capabilities(plugin_id, config={"plugins": {"entries": {plugin_id: entry}}}):
-        _log_capability_decision(plugin_id, capability, True, "granted_capabilities")
+        if audit:
+            _log_capability_decision(plugin_id, capability, True, "granted_capabilities")
         return True
     if _legacy_gate_set(entry, spec):
-        _log_capability_decision(
-            plugin_id, capability, True,
-            f"legacy key plugins.entries.{plugin_id}.{'.'.join(spec.legacy_path)} (deprecated)",
-        )
+        if audit:
+            _log_capability_decision(
+                plugin_id, capability, True,
+                f"legacy key plugins.entries.{plugin_id}.{'.'.join(spec.legacy_path)} (deprecated)",
+            )
         return True
-    _log_capability_decision(plugin_id, capability, False, "not granted")
+    if audit:
+        _log_capability_decision(plugin_id, capability, False, "not granted")
     return False
 
 
