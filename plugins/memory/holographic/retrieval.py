@@ -827,8 +827,14 @@ class FactRetriever:
         ids, matrix = loaded
         numpy = hrr._np()
 
+        # Same cap as the reranker, for the same reason: prefetch() passes the
+        # caller's whole turn text, and a cron job's first turn is the entire
+        # prompt. Three of 2026-09-13's jobs sent >2048 tokens to jina-embed,
+        # which answered 400 "exceeds the available context size", and the
+        # lane silently fell back to FTS-only for that recall.
         vector = embeddings.embed_one(
-            query, url=self.dense_url, timeout=self.dense_timeout
+            query[: self.rerank_max_query_chars],
+            url=self.dense_url, timeout=self.dense_timeout,
         )
         if not vector:
             return [], {}

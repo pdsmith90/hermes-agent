@@ -344,6 +344,20 @@ class TestSearchUnion:
         assert results and "rolled back" in results[0]["content"]
         assert meta["shape"] == "semantic" and meta["dense_candidates"] > 0
 
+    def test_the_query_is_capped_before_it_reaches_the_embedder(self, populated, fake_backend):
+        # 2026-09-13: three cron jobs' first-turn prefetch sent the whole cron
+        # prompt (>2048 tokens) to jina-embed, which answered 400 "exceeds the
+        # available context size" and the dense lane quietly contributed
+        # nothing to that recall. Same cap and same reasoning as the reranker.
+        r = FactRetriever(populated, rerank_url="", hrr_weight=0.0)
+        del fake_backend[:]
+        long_query = "why was the release reverted " + "filler words " * 3000
+        results, meta = r.search(long_query, with_meta=True)
+        sent = [text for batch in fake_backend for text in batch]
+        assert sent, "the dense lane did not run"
+        assert all(len(text) <= r.rerank_max_query_chars for text in sent)
+        assert meta["dense_candidates"] > 0
+
     def test_dense_off_is_authoritative_even_with_the_env_exported(
         self, populated, monkeypatch
     ):
