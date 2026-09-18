@@ -1525,6 +1525,7 @@ _INTERPRETER_EXEC_FLAGS = {
     "ruby": {"-e"},
     "php": {"-r"},
     "powershell": {"-command", "-c", "-file", "-f"},
+    "julia": {"-e", "-E", "--eval", "--print"},
 }
 _INTERPRETER_WITH_ARG = {
     "python": {"-W", "-X", "--check-hash-based-pycs"},
@@ -1532,6 +1533,13 @@ _INTERPRETER_WITH_ARG = {
     "perl": {"-0", "-F", "-I", "-M", "-m", "-x"},
     "ruby": {"-C", "-E", "-F", "-I", "-K", "-r"},
     "php": {"-c", "-d", "-z"},
+    # julia options that REQUIRE a separate value, so `-t 4 -e ...` still finds
+    # -e and `-L helper.jl` does not read the filename as a flag bundle.
+    # Optional-value options (-O, -g, --project) are deliberately absent: listing
+    # them would swallow a following `-e` as their value.
+    "julia": {"-J", "--sysimage", "-L", "--load", "-t", "--threads", "-p", "--procs",
+              "--machine-file", "-C", "--cpu-target", "-H", "--home",
+              "--output-o", "--output-ji", "--output-bc", "--output-asm", "--output-incremental"},
     "powershell": {"-configurationname", "-custompipename", "-executionpolicy", "-inputformat", "-outputformat", "-settingsfile", "-version", "-windowstyle", "-workingdirectory"},
 }
 _READ_TOOL_EXEC_FLAGS = {
@@ -1790,6 +1798,12 @@ def _interpreter_family(executable: str) -> str | None:
         return "php"
     if re.fullmatch(r"powershell(?:\.exe)?|pwsh(?:\.exe)?", name):
         return "powershell"
+    # Julia (added 2026-09-18): a cron experiment-design run used
+    # `julia -e 'using Pkg; Pkg.add("SHTns")'` to install into the operator's
+    # global environment and passed every detector because julia was not a
+    # known interpreter family. Same exec-flag treatment as `python -c`.
+    if re.fullmatch(r"julia(?:\.exe)?", name):
+        return "julia"
     return None
 
 
