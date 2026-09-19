@@ -535,20 +535,11 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.hermes-memory-store."""
-        from pathlib import Path
-        config_path = Path(hermes_home) / "config.yaml"
-        try:
-            import yaml
-            # Write-back round-trip: raw read is correct (merged defaults
-            # must not be persisted back into the user's file).
-            from hermes_cli.config import read_user_config_raw
-            existing = read_user_config_raw(config_path)
-            existing.setdefault("plugins", {})
-            existing["plugins"]["hermes-memory-store"] = values
-            with open(config_path, "w", encoding="utf-8") as f:
-                yaml.dump(existing, f, default_flow_style=False)
-        except Exception:
-            pass
+        # The canonical writer (ported from upstream 9ba5850e95): config lock, managed-mode refusal,
+        # default stripping, atomic replace. ``merge_existing`` keeps every other section;
+        # *hermes_home* is the active profile already.
+        from hermes_cli.config import save_config
+        save_config({"plugins": {"hermes-memory-store": dict(values)}}, merge_existing=True)
 
     def get_config_schema(self):
         from hermes_constants import display_hermes_home

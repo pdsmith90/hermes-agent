@@ -49,7 +49,7 @@ GATE_OFF_BASE = ["cronjob", "messaging", "clarify", "code_execution"]
 @pytest.fixture(autouse=True)
 def _pin_cron_approval_mode_deny():
     """Pin approvals.cron_mode=deny so exact-list assertions are stable."""
-    with patch("tools.approval._get_cron_approval_mode", return_value="deny"):
+    with patch("tools.approval_context._get_cron_approval_mode", return_value="deny"):
         yield
 
 

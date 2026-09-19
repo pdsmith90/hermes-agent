@@ -8,7 +8,7 @@ flags p48/p49/p50/p51 (absent) and p55 (a FALSE PREMISE), while missing p47 (a
 PURE ABSENCE, ce 0.9510) and p52/p53/p54/p56. What actually predicts the score
 is whether the question's VOCABULARY is in the corpus:
 
-  * p55 asks about Jellyfin on pdnas — a media server nothing here has ever
+  * p55 asks about Jellyfin on the NAS — a media server nothing here has ever
     mentioned, so every token is off-corpus and ce is 0.0000.
   * p47 asks how worn the NVMe holding the GGUF files is — no SMART data exists
     anywhere in the store, but NVMe / GGUF / model-files is saturated in-corpus

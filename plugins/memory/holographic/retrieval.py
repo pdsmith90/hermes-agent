@@ -280,7 +280,7 @@ def _env_float(name: str, default: float) -> float:
 #
 # WHICH five is the interesting part, and it is NOT the absent/false-premise
 # split the probe file labels. Flagged: p48, p49, p50, p51 (absent) and p55
-# (false-premise, "Jellyfin on pdnas"). Missed: p47 (ABSENT, ce 0.951) and
+# (false-premise, "Jellyfin on the NAS"). Missed: p47 (ABSENT, ce 0.951) and
 # p52/p53/p54/p56 (false-premise). What actually predicts the score is whether
 # the QUESTION'S VOCABULARY IS IN THE CORPUS:
 #
