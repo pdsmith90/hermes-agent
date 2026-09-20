@@ -369,6 +369,35 @@ def _empty_requested_mcp_toolsets(job: dict, cfg: dict) -> Optional[str]:
         "the job's toolsets.")
 
 
+def _preflight_check_prompt_scan(job: dict) -> Optional[str]:
+    """Reason when the job's OWN stored prompt would trip the fire-time injection scanner.
+
+    ``_scan_assembled_cron_prompt`` refuses the run at dispatch — after the prerun script has
+    already executed, with a fresh incident row and no alert dedup — and nothing checks the
+    stored prompt earlier. On 2026-09-20 experiment-design failed at 05:10 because a prose
+    sentence quoted an old incident command matching ``read_secrets``: its skill had been
+    detached the day before, which moved the job from the LOOSE pattern set to the STRICT one.
+    Mirror that tiering here (skills attached → loose; none → strict) so the block lands as an
+    alert-once ``blocked_config`` instead of a nightly failure. Skill bodies are vetted at install
+    time and are not re-read by this check.
+    """
+    prompt = job.get("prompt") or ""
+    if job.get("no_agent") or not prompt.strip():
+        return None
+    from tools.cronjob_prompt_scan import _scan_cron_prompt, _scan_cron_skill_assembled
+    if job.get("skills") or job.get("skill"):
+        _cleaned, scan_error = _scan_cron_skill_assembled(prompt)
+    else:
+        scan_error = _scan_cron_prompt(prompt)
+    if not scan_error:
+        return None
+    return (
+        f"the job's prompt trips the cron injection scanner ({scan_error}) so every fire would be "
+        "refused. Rephrase the sentence — describe a command instead of quoting it — or attach the "
+        "skill the wording assumed; patterns: tools/cronjob_prompt_scan.py::_CRON_THREAT_PATTERNS."
+    )
+
+
 def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     """Pre-dispatch validation: return a reason (missing key, unconfigured delivery, unready skill)
     so the caller refuses BEFORE building agent machinery or burning an LLM call. Every check fails
@@ -380,7 +409,8 @@ def _preflight_job_config(job: dict, cfg: dict) -> Optional[str]:
     for name, check in (
         ("provider_key", lambda: _preflight_check_provider_key(job, cfg)),
         ("skills", lambda: _preflight_check_skills(job)),
-        ("delivery", lambda: _preflight_check_delivery(job))):
+        ("delivery", lambda: _preflight_check_delivery(job)),
+        ("prompt_scan", lambda: _preflight_check_prompt_scan(job))):
         try:
             reason = check()
         except Exception:

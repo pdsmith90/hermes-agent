@@ -2924,7 +2924,9 @@ def _classify_delivery_outcome(
         return "suppressed"
     if should_deliver and unresolved_origin:
         return "not_configured"
-    if should_deliver and normalized_deliver != "local":
+    if should_deliver and normalized_deliver not in ("local", "none"):
+        # ``none`` resolves to zero targets in _resolve_delivery_targets, exactly like ``local``;
+        # recording it as "delivered" over-credited every file-only job (2026-09-20 review).
         return "delivered"
     if incident_acked and not success:
         # Failure ping withheld for a known signature: operator acked it, or it was already
