@@ -645,14 +645,19 @@ def _unattended_deny(command: str, ctx: _Unattended) -> dict | None:
     if ctx.mode() != "deny":
         return None
 
-    def block(subject: str) -> dict:
+    def block(subject: str, advice: str = "Find an alternative approach that avoids this command.") -> dict:
         return {"approved": False, "message": ctx.block_message(
-            subject, noun="dangerous commands",
-            advice="Find an alternative approach that avoids this command.")}
+            subject, noun="dangerous commands", advice=advice)}
 
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     if is_dangerous and not _is_permanently_approved(pattern_key):
-        result = block(f"Command flagged as dangerous ({description})")
+        advice = "Find an alternative approach that avoids this command."
+        if description in ("script execution via -e/-c flag", "script execution via heredoc"):
+            # 2026-09-21: three cron runs in one morning each burned a turn on a `python3 -c`
+            # JSON one-liner before finding the same workaround; name it in the refusal.
+            advice += (" For JSON, pipe through `python3 -m json.tool` or `jq`; for anything "
+                       "longer, write a script file and run it by path.")
+        result = block(f"Command flagged as dangerous ({description})", advice)
         if ctx.name == "single_query":
             result.update(pattern_key=pattern_key, description=description)
         return result

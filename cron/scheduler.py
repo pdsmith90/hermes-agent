@@ -2634,6 +2634,18 @@ def run_job(
                 _second_text = str(_second.get("final_response") or "").strip()
                 if _second_text == "(No response generated)":
                     _second_text = ""
+            if _second_text and _is_cron_silence_response(_second_text):
+                # 2026-09-21 retrieval-audit: turn 1 was a 1406-char report ("13 PASS, 0 FAIL",
+                # one repair) missing only the literal header; the nudge got "[SILENT]" back,
+                # and because silence sentinels bypass the marker check it replaced the report
+                # in the output file and the morning briefing. The gate exists to recover a
+                # report, never to lose one: a silence answer to the nudge keeps the first
+                # response, flagged like an empty follow-up.
+                _gate_note = (
+                    f"fired (marker \"{_gate_marker}\" missing); the follow-up answered "
+                    f"[SILENT] — first response kept"
+                )
+                _second_text = ""
             if _second_text:
                 final_response = _second_text
                 if _report_gate_missing_marker(job, final_response):

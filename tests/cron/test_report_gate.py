@@ -179,6 +179,19 @@ class TestRunJobReportGate:
         assert final_response == NARRATION["final_response"]
         assert "the follow-up failed (RuntimeError)" in output
 
+    @pytest.mark.parametrize("silence", ["[SILENT]", "SILENT", "  [silent]  "])
+    def test_silent_follow_up_keeps_the_first_response(self, tmp_path, silence):
+        # 2026-09-21 retrieval-audit: a 13/13 PASS report lacking only the literal header,
+        # then "[SILENT]" to the nudge — the sentinel bypasses the marker check and had
+        # replaced the real report with silence in the output file and the briefing.
+        (success, output, final_response, _), agent = _run(
+            tmp_path, self.JOB, [NARRATION, {"final_response": silence}])
+        assert success is True
+        assert final_response == NARRATION["final_response"]
+        assert "the follow-up answered [SILENT] — first response kept" in output
+        assert "the follow-up produced the report" not in output
+        assert agent.run_conversation.call_count == 2
+
     def test_follow_up_still_without_header_is_delivered_and_flagged(self, tmp_path):
         second = {"final_response": "Designed both. Done."}
         (success, output, final_response, _), agent = _run(
