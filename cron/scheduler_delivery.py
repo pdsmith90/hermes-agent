@@ -627,7 +627,11 @@ def _resolve_single_delivery_target(
         for platform_name in _iter_home_target_platforms():
             chat_id = _get_home_target_chat_id(platform_name)
             if chat_id:
-                logger.info(
+                # DEBUG, not INFO (2026-09-22): a CLI-created job never has an origin, so
+                # this is the normal path, and the resolver runs several times per
+                # delivery — four identical INFO lines per report said nothing the
+                # "delivered to <platform>:<chat_id>" line does not.
+                logger.debug(
                     "Job '%s' has deliver=origin but no origin; falling back to %s home channel",
                     job.get("name", job.get("id", "?")), platform_name)
                 # Stands in for the primary conversation (NOT a broadcast): mirror-eligible.
