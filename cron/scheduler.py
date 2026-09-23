@@ -569,6 +569,8 @@ def _strip_report_preamble(job: dict, text: str) -> str:
     paragraph above their headers). Trims the delivered copy only — the cron output file keeps
     the full response. A line that STARTS with the marker (after markdown decoration) wins over
     one that merely mentions it, so "Writing the Morning Briefing now." is not the cut point.
+    A second header with a body after it wins over the first: everything between two drafts
+    is narration (2026-09-23).
     """
     marker = str(job.get("report_marker") or "").strip()
     body = text or ""
@@ -577,8 +579,18 @@ def _strip_report_preamble(job: dict, text: str) -> str:
     norm_marker = _normalize_report_text(marker)
     lines = body.splitlines(keepends=True)
     normalized = [_normalize_report_text(line.lstrip("#*_> \t")) for line in lines]
-    start = next((i for i, n in enumerate(normalized) if n.startswith(norm_marker)), None)
-    if start is None:
+    starts = [i for i, n in enumerate(normalized) if n.startswith(norm_marker)]
+    if starts:
+        start = starts[0]
+        # 2026-09-23: daily-trace-mining shipped its first draft, then "Wait — I need to double
+        # check…", "Let me reconsider…", then a second draft — 5.5 KB on the phone. When the
+        # header opens more than one block, the LAST one that still has a body is the model's
+        # final report; a trailing one-liner ("Daily Trace Mining done.") is not a draft.
+        for cand in reversed(starts[1:]):
+            if sum(1 for line in lines[cand:] if line.strip()) >= _REPORT_MIN_LINES:
+                start = cand
+                break
+    else:
         start = next((i for i, n in enumerate(normalized) if norm_marker in n), None)
     if not start:
         return body
@@ -588,6 +600,9 @@ def _strip_report_preamble(job: dict, text: str) -> str:
 #: Wall-clock cap on the follow-up turn. The first turn is guarded by the
 #: inactivity watchdog; the follow-up is one bounded continuation.
 _REPORT_GATE_TIMEOUT_S = 600.0
+#: A later header line counts as a redraft only when at least this many non-blank lines
+#: follow it — fewer is a sign-off, not a report.
+_REPORT_MIN_LINES = 3
 
 
 def _report_gate_follow_up(marker: str) -> str:

@@ -90,6 +90,21 @@ class TestPreambleStrip:
         assert _strip_report_preamble({**self.JOB, "no_agent": True}, "x\ny") == "x\ny"
         assert _strip_report_preamble(self.JOB, "[SILENT]") == "[SILENT]"
 
+    def test_second_draft_wins_over_narration_and_the_first_draft(self):
+        # 2026-09-23: daily-trace-mining delivered draft 1 + "Wait — let me reconsider…" + draft 2.
+        job = {"report_marker": "Daily Trace Mining"}
+        text = ("**Daily Trace Mining — 2026-09-23**\n\nRecurring patterns:\n- draft one\n\n"
+                "Wait — I need to double check the coverage.\nLet me write it.\n"
+                "**Daily Trace Mining — 2026-09-23**\n\nRecurring patterns:\n- draft two\n\n"
+                "Coverage: partial\n")
+        assert _strip_report_preamble(job, text) == (
+            "**Daily Trace Mining — 2026-09-23**\n\nRecurring patterns:\n- draft two\n\n"
+            "Coverage: partial\n")
+
+    def test_a_trailing_header_one_liner_is_not_a_draft(self):
+        text = "Morning Briefing — d\n- a\n- b\nMorning Briefing done.\n"
+        assert _strip_report_preamble(self.JOB, text) == text
+
 
 _PROVIDER = {
     "api_key": "test-key",
