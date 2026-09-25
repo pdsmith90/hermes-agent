@@ -29,6 +29,12 @@ def test_generic_failure_names_runs_and_pause_commands_and_the_real_output_dir()
     assert "cron output" not in msg  # the unnamed internal location is gone
 
 
+def test_generic_failure_does_not_promise_a_report_file():
+    msg = _summarize_cron_failure_for_delivery(JOB, "Blocked: prompt matches threat pattern")
+    assert "hermes cron runs ab12cd34" in msg
+    assert "if present" in msg
+
+
 def test_auth_failure_points_at_login_and_a_retry_command(monkeypatch):
     _no_chain(monkeypatch)
     msg = _summarize_cron_failure_for_delivery(JOB, "Error code: 401 - Unauthorized")

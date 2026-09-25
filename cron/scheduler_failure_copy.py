@@ -104,8 +104,8 @@ def generic_failure_notice(job_name: str, job_id: str, cleaned_error: str) -> st
     """Unclassified failure: the cleaned error text plus where to look and what to do."""
     return (
         f"⚠️ Cron '{job_name}' failed: {cleaned_error}. "
-        f"See the full run with `hermes cron runs {job_id}` (output saved under "
-        f"{cron_output_dir_display(job_id)}); run it again with `hermes cron run {job_id}`, "
+        f"See run details with `hermes cron runs {job_id}`. Output files, if present, are under "
+        f"{cron_output_dir_display(job_id)}; run it again with `hermes cron run {job_id}`, "
         f"edit it with `hermes cron edit {job_id}`, or pause it with `hermes cron pause {job_id}`."
     )
 

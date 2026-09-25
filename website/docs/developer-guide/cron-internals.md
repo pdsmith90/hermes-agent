@@ -305,6 +305,16 @@ stopped by cleanup is resumed if termination fails; already-stopped targets keep
 their original state. Explicit graceful signals do not suspend their recipients.
 Windows continues to use `taskkill /F /T`.
 
+### Prompt and Report Integrity
+
+Before constructing the agent, the scheduler scans the stored job prompt and per-run context, then scans the assembled prompt containing runtime inputs such as attached skills, pre-run script output, monitor data, upstream `context_from` output, and the job notepad. The scanner applies the policy appropriate to each input class.
+
+If a scan blocks the run, the agent is not started. The normal failure path saves a `BLOCKED` run report with a `Scanner source` label. The label names matching component(s) without copying matched text; if no component independently explains a match, it identifies the combined assembled prompt.
+
+Jobs may set `report_marker` to require a report heading. If the first response omits it, the scheduler gives the same session one follow-up turn. A failed or silent follow-up preserves the first response. When multiple report headings appear, delivery uses the last valid draft while the saved output retains the full response.
+
+The `morning-briefing` job can include a versioned execution manifest in its script output, delimited by `@@HERMES_CRON_MANIFEST_JSON_BEGIN@@` and `@@HERMES_CRON_MANIFEST_JSON_END@@`. Before saving or delivering the response, the scheduler checks that the briefing accounts for each execution and report file, calls out failed or unknown runs and delivery outcomes, verifies repeat counts, and includes unmatched files or prior-fact correction candidates. A missing manifest, unavailable execution ledger, or unavailable correction scan is surfaced instead of certifying `[SILENT]`.
+
 ### Provider Recovery
 
 `run_job()` passes the user's configured fallback providers and credential pool into the `AIAgent` instance:

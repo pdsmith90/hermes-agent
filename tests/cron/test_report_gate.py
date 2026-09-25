@@ -9,17 +9,173 @@ header; a job's ``report_marker`` names it and ``run_job`` grants exactly one
 follow-up turn, in the same conversation, when it is absent.
 """
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cron.scheduler import (
     _normalize_report_text,
+    _enforce_morning_briefing_coverage,
     _report_gate_missing_marker,
     _strip_report_preamble,
     run_job,
     run_one_job as sched_run_one_job,
 )
+
+
+def _manifest_prompt(manifest):
+    return (
+        "prefix\n@@HERMES_CRON_MANIFEST_JSON_BEGIN@@\n"
+        + json.dumps(manifest)
+        + "\n@@HERMES_CRON_MANIFEST_JSON_END@@\nsuffix"
+    )
+
+
+class TestMorningBriefingCoverageGate:
+    def test_complete_manifest_response_passes_unchanged(self):
+        manifest = {
+            "version": 1,
+            "date": "2026-09-25",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "daily1234567", "name": "daily-review", "status": "completed",
+                 "delivery": "suppressed", "issue": None,
+                 "report_files": ["cron/output/daily1234567/2026-09-25_02-13-38.md"]},
+            ],
+            "report_files": [
+                {"job_id": "daily1234567", "name": "daily-review",
+                 "path": "cron/output/daily1234567/2026-09-25_02-13-38.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        response = "Morning Briefing — 2026-09-25\n\n**What Happened Overnight**\n- daily-review: ACTIVITY recorded.\n"
+
+        assert _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), response
+        ) == response
+
+    def test_coverage_checks_the_last_report_draft_that_will_be_delivered(self):
+        manifest = {
+            "version": 1,
+            "date": "2026-09-25",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "invest123456", "name": "invest-daily-brief", "status": "completed",
+                 "delivery": "suppressed", "issue": None,
+                 "report_files": ["cron/output/invest123456/report.md"]},
+            ],
+            "report_files": [
+                {"job_id": "invest123456", "name": "invest-daily-brief",
+                 "path": "cron/output/invest123456/report.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        response = (
+            "**Morning Briefing — 2026-09-25**\n\n**What Happened Overnight**\n"
+            "- invest-daily-brief: market report ready.\n\n"
+            "Wait — I should tighten this.\n"
+            "**Morning Briefing — 2026-09-25**\n\n**What Happened Overnight**\n"
+            "- daily-review: ACTIVITY saved.\n- arxiv-research-scan: [SILENT].\n"
+        )
+
+        result = _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing", "report_marker": "Morning Briefing"},
+            _manifest_prompt(manifest), response)
+
+        assert "invest-daily-brief: 1 run(s)" in result
+
+    def test_appends_omitted_report_and_scanner_failure(self):
+        manifest = {
+            "version": 1,
+            "date": "2026-09-25",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "invest123456", "name": "invest-daily-brief", "status": "completed",
+                 "delivery": "suppressed", "issue": None,
+                 "report_files": ["cron/output/invest123456/2026-09-25_05-08-22.md"]},
+                {"job_id": "distill123456", "name": "claude-memory-distill", "status": "failed",
+                 "delivery": "delivered", "issue": "prompt-scanner block", "report_files": []},
+            ],
+            "report_files": [
+                {"job_id": "invest123456", "name": "invest-daily-brief",
+                 "path": "cron/output/invest123456/2026-09-25_05-08-22.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        response = "Morning Briefing — 2026-09-25\n\n**Store healthy.**\n"
+
+        result = _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), response)
+
+        assert result.startswith(response)
+        assert "invest-daily-brief" in result
+        assert "claude-memory-distill" in result
+        assert "prompt-scanner block" in result
+        assert "no report file" in result.lower()
+
+    def test_flags_delivery_failure_on_a_completed_execution(self):
+        manifest = {
+            "version": 1,
+            "date": "2026-09-25",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "job123456789", "name": "daily-trace-mining", "status": "completed",
+                 "delivery": "failed", "issue": None, "report_files": ["cron/output/job123456789/r.md"]},
+            ],
+            "report_files": [
+                {"job_id": "job123456789", "name": "daily-trace-mining", "path": "cron/output/job123456789/r.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        response = "Morning Briefing — 2026-09-25\n\n**What Happened Overnight**\n- daily-trace-mining: no notable pattern.\n"
+
+        result = _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), response)
+
+        assert "delivery=failed" in result
+
+    def test_requires_repeat_count_when_one_job_has_multiple_runs(self):
+        manifest = {
+            "version": 1,
+            "date": "2026-09-25",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "trace12345678", "name": "daily-trace-mining", "status": "completed",
+                 "delivery": "suppressed", "issue": None,
+                 "report_files": ["cron/output/trace12345678/a.md", "cron/output/trace12345678/b.md"]},
+                {"job_id": "trace12345678", "name": "daily-trace-mining", "status": "completed",
+                 "delivery": "delivered", "issue": None,
+                 "report_files": ["cron/output/trace12345678/a.md", "cron/output/trace12345678/b.md"]},
+            ],
+            "report_files": [
+                {"job_id": "trace12345678", "name": "daily-trace-mining", "path": "cron/output/trace12345678/a.md"},
+                {"job_id": "trace12345678", "name": "daily-trace-mining", "path": "cron/output/trace12345678/b.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        response = "Morning Briefing — 2026-09-25\n- daily-trace-mining: one trace was quiet.\n"
+
+        result = _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), response)
+
+        assert "ran 2x" in result
+
+    def test_silence_is_preserved_only_for_an_empty_complete_manifest(self):
+        manifest = {
+            "version": 1,
+            "date": "2026-09-25",
+            "execution_ledger_available": True,
+            "executions": [], "report_files": [], "unmatched_report_files": [],
+        }
+        assert _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), "[SILENT]") == "[SILENT]"
+
+    def test_missing_manifest_cannot_certify_silence(self):
+        result = _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, "no manifest", "[SILENT]")
+        assert result.startswith("Morning Briefing —")
+        assert "inventory could not be verified" in result
 
 
 class TestMarkerHelper:
@@ -158,6 +314,31 @@ class TestRunJobReportGate:
         assert "**Report gate:** fired" in output
         assert "the follow-up produced the report" in output
         assert output.index("**Report gate:**") < output.index("## Prompt")
+
+    def test_morning_briefing_coverage_gate_runs_before_the_output_is_saved(self, tmp_path):
+        manifest = {
+            "version": 1,
+            "date": "2026-09-25",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "invest123456", "name": "invest-daily-brief", "status": "completed",
+                 "delivery": "suppressed", "issue": None,
+                 "report_files": ["cron/output/invest123456/report.md"]},
+            ],
+            "report_files": [
+                {"job_id": "invest123456", "name": "invest-daily-brief",
+                 "path": "cron/output/invest123456/report.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        job = {"id": "morning", "name": "morning-briefing", "prompt": "compile", "report_marker": "Morning Briefing"}
+        response = {"final_response": "Morning Briefing — 2026-09-25\n\n**Quiet night.**"}
+        with patch("cron.scheduler._prepare_job_prompt", return_value=(None, _manifest_prompt(manifest))):
+            (success, output, final_response, error), _agent = _run(tmp_path, job, [response])
+
+        assert success is True and error is None
+        assert "invest-daily-brief" in final_response
+        assert "Scheduler-verified coverage gaps" in output
 
     def test_report_on_the_first_turn_is_left_alone(self, tmp_path):
         (success, output, final_response, _), agent = _run(tmp_path, self.JOB, [REPORT])

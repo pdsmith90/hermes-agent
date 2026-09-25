@@ -374,6 +374,54 @@ class CronPromptInjectionBlocked(Exception):
     """
 
 
+def _is_cron_prompt_injection_block(exc: Exception) -> bool:
+    """Recognize a scanner block even if a gateway reload left two class objects alive.
+
+    The prompt builder and scheduler are late-bound across module reloads. An old exception class
+    with the same fully-qualified name can otherwise escape the pre-agent handler and bypass the
+    normal saved-output/failure-notice path.
+    """
+    exc_type = type(exc)
+    return isinstance(exc, CronPromptInjectionBlocked) or (
+        exc_type.__name__ == CronPromptInjectionBlocked.__name__
+        and exc_type.__module__ == CronPromptInjectionBlocked.__module__
+    )
+
+
+def _prompt_injection_block_sources(
+    job: dict, *, extra_prompt: Optional[str], prerun_script, runtime_data_prompt: Optional[str],
+) -> str:
+    """Identify the scanned input section that independently matches, without returning its text."""
+    from tools.cronjob_prompt_scan import _scan_cron_skill_assembled
+    from tools.cronjob_tools import _scan_cron_prompt
+
+    matches = []
+    user_prompt = str(job.get("prompt") or "")
+    if extra_prompt:
+        user_prompt = f"{user_prompt}\n\n## Run Context\n{extra_prompt}"
+    if _scan_cron_prompt(user_prompt):
+        matches.append("job prompt/per-run context")
+    if prerun_script is not None and prerun_script[1]:
+        if _scan_cron_skill_assembled(str(prerun_script[1]))[1]:
+            matches.append("pre-run script output")
+    if runtime_data_prompt and _scan_cron_skill_assembled(runtime_data_prompt)[1]:
+        matches.append("monitor data")
+    if matches:
+        return ", ".join(matches)
+
+    possible = ["job prompt"]
+    if prerun_script is not None and prerun_script[1]:
+        possible.append("pre-run script output")
+    if runtime_data_prompt:
+        possible.append("monitor data")
+    if job.get("context_from"):
+        possible.append("upstream job output")
+    if job.get("skill") or job.get("skills"):
+        possible.append("attached skill content")
+    possible.append("job notepad if present")
+    return "could not isolate within " + ", ".join(possible)
+
+
 def _resolve_cron_disabled_toolsets(cfg: dict) -> list[str]:
     """Toolsets a cron-spawned agent must never receive: ``messaging``/``clarify`` always
     (interactive); ``cronjob`` by default (loop prevention, not a security boundary —
@@ -595,6 +643,169 @@ def _strip_report_preamble(job: dict, text: str) -> str:
     if not start:
         return body
     return "".join(lines[start:])
+
+
+def _morning_briefing_manifest(prompt: str) -> Optional[dict]:
+    begin = "@@HERMES_CRON_MANIFEST_JSON_BEGIN@@"
+    end = "@@HERMES_CRON_MANIFEST_JSON_END@@"
+    if prompt.count(begin) != 1 or prompt.count(end) != 1:
+        return None
+    start = prompt.find(begin) + len(begin)
+    stop = prompt.find(end, start)
+    if stop < 0:
+        return None
+    try:
+        manifest = json.loads(prompt[start:stop].strip())
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("version") != 1:
+        return None
+    if not isinstance(manifest.get("executions"), list) or not isinstance(manifest.get("report_files"), list):
+        return None
+    return manifest
+
+
+def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: str) -> str:
+    """Append scheduler-verified gaps the LLM omitted from the morning Telegram brief."""
+    if job.get("name") != "morning-briefing":
+        return final_response
+    manifest = _morning_briefing_manifest(prompt)
+    raw_response = final_response or ""
+    body = _strip_report_preamble(job, raw_response).strip()
+    date = str(manifest.get("date") if manifest else "") or _hermes_now().date().isoformat()
+    if manifest is None:
+        gaps = ["the execution manifest is unavailable; inventory could not be verified"]
+    else:
+        gaps: list[str] = []
+        executions = [row for row in manifest["executions"] if isinstance(row, dict)]
+        report_files = [row for row in manifest["report_files"] if isinstance(row, dict)]
+        files_by_job: dict[str, set[str]] = {}
+        for report in report_files:
+            job_id = str(report.get("job_id") or "")
+            if job_id:
+                files_by_job.setdefault(job_id, set()).add(str(report.get("path") or ""))
+
+        by_job: dict[str, list[dict]] = {}
+        for row in executions:
+            job_id = str(row.get("job_id") or "")
+            if job_id:
+                by_job.setdefault(job_id, []).append(row)
+
+        response_lines = body.splitlines()
+        for job_id, rows in by_job.items():
+            name = str(rows[0].get("name") or job_id)
+            name_token = re.compile(rf"(?<![a-z0-9_-]){re.escape(name.casefold())}(?![a-z0-9_-])")
+            matching_lines = [
+                line for line in response_lines
+                if name_token.search(line.casefold()) or job_id.casefold() in line.casefold()
+            ]
+            report_paths = files_by_job.get(job_id, set())
+            run_count = len(rows)
+            if not matching_lines:
+                statuses = ",".join(sorted({str(row.get("status") or "unknown") for row in rows}))
+                report_text = f"{len(report_paths)} report file(s)" if report_paths else "no report file"
+                details = []
+                for row in rows:
+                    status = str(row.get("status") or "unknown").lower()
+                    delivery = str(row.get("delivery") or "not recorded").lower()
+                    issue = str(row.get("issue") or "details in hermes cron runs")
+                    if status in ("failed", "unknown"):
+                        details.append(f"issue={issue}, delivery={delivery}")
+                    elif delivery in ("failed", "unknown", "not_configured"):
+                        details.append(f"delivery={delivery}")
+                gaps.append(
+                    f"{name}: {run_count} run(s), status={statuses}, {report_text}, omitted from the summary"
+                    + (f" ({'; '.join(details)})" if details else "")
+                )
+            elif run_count > 1:
+                count_pattern = re.compile(
+                    rf"\bran\s*(?:{run_count}\s*x|x\s*{run_count})\b|\b{run_count}\s+runs?\b",
+                    re.IGNORECASE,
+                )
+                if not any(count_pattern.search(line) for line in matching_lines):
+                    gaps.append(
+                        f"{name}: ran {run_count}x and has {len(report_paths)} report files, "
+                        "but the summary does not identify the repeat"
+                    )
+
+            if run_count > 1 and len(report_paths) < run_count:
+                gaps.append(
+                    f"{name}: {run_count} execution(s) but only {len(report_paths)} report file(s) "
+                    "were recorded"
+                )
+
+            for row in rows:
+                status = str(row.get("status") or "unknown").lower()
+                delivery = str(row.get("delivery") or "not recorded").lower()
+                issue = str(row.get("issue") or "details in hermes cron runs")
+                if matching_lines and status in ("failed", "unknown") and not any(
+                    re.search(r"\b(error|failed|failure|blocked|unavailable|unknown)\b", line, re.I)
+                    for line in matching_lines
+                ):
+                    gaps.append(
+                        f"{name}: status={status}, issue={issue}, delivery={delivery}, "
+                        f"reports={'none' if not report_paths else len(report_paths)}; not flagged"
+                    )
+                if matching_lines and delivery in ("failed", "unknown", "not_configured") and not any(
+                    "deliver" in line.casefold()
+                    and re.search(r"\b(failed|failure|unknown|not configured|unresolved)\b", line, re.I)
+                    for line in matching_lines
+                ):
+                    gaps.append(f"{name}: delivery={delivery}; job status={status}, but not flagged")
+                if matching_lines and status == "completed" and not report_paths:
+                    gaps.append(f"{name}: completed execution has no saved report file")
+
+        for orphan in manifest.get("unmatched_report_files", []):
+            if not isinstance(orphan, dict):
+                continue
+            gaps.append(
+                f"{orphan.get('name') or orphan.get('job_id') or 'unknown job'}: "
+                f"report file has no execution row ({orphan.get('path') or 'path unavailable'})"
+            )
+        if manifest.get("execution_ledger_available") is False:
+            gaps.append("execution ledger unavailable; run inventory is incomplete")
+        if manifest.get("prior_briefing_correction_scan_available") is False:
+            gaps.append("prior-briefing retraction scan unavailable; correction status is unverified")
+        for correction in manifest.get("prior_briefing_corrections", []):
+            if not isinstance(correction, dict):
+                continue
+            fact_id = str(correction.get("fact_id") or "")
+            correction_already_reported = any(
+                "correction" in line.casefold()
+                and re.search(rf"\bfid\s*[=:]?\s*{re.escape(fact_id)}\b", line, re.I)
+                for line in response_lines
+            )
+            if not correction_already_reported:
+                gaps.append(
+                    f"Correction — {correction.get('prior_brief_date') or 'prior'} briefing reported "
+                    f"fid={fact_id} {correction.get('prior_status') or 'with a prior status'}; "
+                    f"current fact is {correction.get('current_status') or 'changed'} "
+                    f"({correction.get('marker') or 'retraction marker'}, updated "
+                    f"{correction.get('updated_at') or 'recently'}). Disregard the earlier status."
+                )
+
+    if not gaps:
+        return final_response
+
+    if _is_cron_silence_response(body):
+        raw_response = f"Morning Briefing — {date}"
+        body = raw_response
+    if not body:
+        raw_response = f"Morning Briefing — {date}"
+        body = raw_response
+    has_header = any(
+        _normalize_report_text(line.lstrip("#*_> \t")).startswith("morning briefing")
+        for line in body.splitlines()
+    )
+    if not has_header:
+        raw_response = f"Morning Briefing — {date}\n\n{raw_response}"
+    logger.warning(
+        "Morning briefing coverage check found %d gap(s); appending the scheduler-verified ledger",
+        len(gaps),
+    )
+    return raw_response.rstrip() + "\n\n**Scheduler-verified coverage gaps**\n" + "".join(
+        f"- {gap}\n" for gap in dict.fromkeys(gaps)
+    )
 
 
 #: Wall-clock cap on the follow-up turn. The first turn is guarded by the
@@ -2151,25 +2362,29 @@ def _prepare_job_prompt(
             job, prerun_script=prerun_script, extra_prompt=extra_prompt,
             runtime_data_prompt=monitor_context,
         )
-    except CronPromptInjectionBlocked as block_exc:
+    except Exception as block_exc:
+        if not _is_cron_prompt_injection_block(block_exc):
+            raise
         # Injection scanner tripped: refuse this tick and tell the operator WHY.
         logger.warning(
             "Job '%s' (ID: %s): blocked by prompt-injection scanner — %s", job_name, job_id, block_exc,
+        )
+        source = getattr(block_exc, "scanner_source", None) or _prompt_injection_block_sources(
+            job, extra_prompt=extra_prompt, prerun_script=prerun_script,
+            runtime_data_prompt=monitor_context,
         )
         blocked_doc = (
             f"# Cron Job: {job_name}\n\n"
             f"**Job ID:** {job_id}\n"
             f"**Run Time:** {_hermes_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"**Status:** BLOCKED\n\n"
-            "The assembled prompt (user prompt + loaded skill content) tripped "
-            "the cron injection scanner and the agent was NOT run.\n\n"
-            f"**Scanner result:** {block_exc}\n\n"
-            "Audit the skill(s) attached to this job for prompt-injection "
-            "payloads or invisible-unicode markers. If the skill is legitimate "
-            "and the match is a false positive, rephrase the content to avoid "
-            "the threat pattern (`tools/cronjob_tools.py::_CRON_THREAT_PATTERNS`)."
+            "The cron injection scanner blocked the assembled prompt before the agent ran.\n\n"
+            f"**Scanner source:** {source}.\n"
+            "No matched text is copied into this report; inspect the source component, and do not "
+            "disable the scanner.\n\n"
+            f"**Scanner result:** {block_exc}"
         )
-        return (False, blocked_doc, "", str(block_exc)), None
+        return (False, blocked_doc, "", f"{block_exc} (source: {source})"), None
     if prompt is None:
         logger.info("Job '%s': script produced no output, skipping AI call.", job_name)
         return (True, "", SILENT_MARKER, None), None
@@ -2566,6 +2781,8 @@ def run_job(
     early, prompt = _prepare_job_prompt(job, job_id, job_name, extra_prompt, cancel_event)
     if early is not None:
         return early
+    if prompt is None:
+        raise RuntimeError("Cron prompt preparation returned no early result and no prompt.")
     from run_agent import AIAgent
 
     _cron_session_id = f"cron_{job_id}_{_hermes_now().strftime('%Y%m%d_%H%M%S')}"
@@ -2679,6 +2896,7 @@ def run_job(
                     f"returned nothing — first response kept"
                 )
             logger.info("Job '%s': report gate %s", job_name, _gate_note)
+        final_response = _enforce_morning_briefing_coverage(job, prompt, final_response)
         _gate_line = f"\n**Report gate:** {_gate_note}" if _gate_note else ""
         # Keep final_response clean for delivery logic (empty = no delivery).
         logged_response = final_response if final_response else "(No response generated)"

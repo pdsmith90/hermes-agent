@@ -63,7 +63,9 @@ _UPSTREAM_CONTEXT_INTRO = (
 )
 
 
-def _inject_context_from(job: dict, prompt: str) -> tuple[str, bool]:
+def _inject_context_from(
+    job: dict, prompt: str, *, source_components: Optional[list[tuple[str, str, bool]]] = None,
+) -> tuple[str, bool]:
     """Prepend the latest output of each ``context_from`` job; returns ``(prompt, injected)``."""
     context_from = job.get("context_from")
     if not context_from:
@@ -110,6 +112,8 @@ def _inject_context_from(job: dict, prompt: str) -> tuple[str, bool]:
                     latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]")
             if not latest_output:
                 continue  # silent skip — empty output
+            if source_components is not None:
+                source_components.append(("upstream job output", latest_output, False))
             if is_self:
                 prompt = _prepend_context_block(
                     prompt, "Your previous run's output", _SELF_CONTEXT_INTRO, latest_output)
@@ -230,11 +234,15 @@ def _build_job_prompt(
     if extra_prompt:
         user_prompt = f"{user_prompt}\n\n## Run Context\n{extra_prompt}"
     prompt = user_prompt
+    source_components: list[tuple[str, str, bool]] = [
+        ("job prompt/per-run context", user_prompt, True),
+    ]
     # Runtime DATA (script stdout, upstream output) legitimately quotes command-shape strings, so it
     # must not be scanned with the strict user-prompt set — see _scan_assembled_cron_prompt.
     has_injected_data = False
     if runtime_data_prompt:
         prompt = f"{prompt}\n\n## Run Context\n{runtime_data_prompt}"
+        source_components.append(("monitor data", runtime_data_prompt, False))
         has_injected_data = True
 
     script_path = job.get("script")
@@ -245,6 +253,8 @@ def _build_job_prompt(
                 script_path, workdir=_sched._resolve_job_workdir(job, str(job.get("id") or ""))))
         if success and not script_output:
             return None  # no output → nothing to report, skip the AI call
+        if script_output:
+            source_components.append(("pre-run script output", str(script_output), False))
         heading, intro = (
             ("Script Output", "The following data was collected by a pre-run script. "
                               "Use it as context for your analysis.")
@@ -254,7 +264,9 @@ def _build_job_prompt(
         prompt = _prepend_context_block(prompt, heading, intro, script_output)
         has_injected_data = True
 
-    prompt, _ctx_injected = _inject_context_from(job, prompt)
+    prompt, _ctx_injected = _inject_context_from(
+        job, prompt, source_components=source_components,
+    )
     has_injected_data = has_injected_data or _ctx_injected
 
     # Durable per-job notepad; empty renders as "" so unused → byte-identical prompt.
@@ -262,6 +274,7 @@ def _build_job_prompt(
     notepad_section = cron_notepad.render_notepad_section(str(job.get("id") or ""))
     if notepad_section:
         prompt = f"{notepad_section}{prompt}"
+        source_components.append(("job notepad", notepad_section, False))
         has_injected_data = True
 
     prompt = _CRON_HINT + prompt
@@ -269,10 +282,13 @@ def _build_job_prompt(
     if not skill_names:
         return _scan_assembled_cron_prompt(
             prompt, job, has_skills=False, has_injected_data=has_injected_data,
-            user_prompt=user_prompt,
+            user_prompt=user_prompt, source_components=source_components,
         )
 
     parts = _load_cron_skill_parts(job, skill_names)
+    skill_content = "\n".join(parts)
+    if skill_content:
+        source_components.append(("attached skill content", skill_content, False))
     stable_prefix = None
     if prompt:
         from agent.skill_commands import append_user_instruction
@@ -283,7 +299,9 @@ def _build_job_prompt(
         # instruction carries the volatile per-run data (cron hint + prompt + script output + run context).
         # See #81867.
         stable_prefix = append_user_instruction(parts, prompt)
-    assembled = _scan_assembled_cron_prompt("\n".join(parts), job, has_skills=True)
+    assembled = _scan_assembled_cron_prompt(
+        "\n".join(parts), job, has_skills=True, source_components=source_components,
+    )
     if (
         stable_prefix
         and len(assembled) > len(stable_prefix)
@@ -298,6 +316,7 @@ def _build_job_prompt(
 def _scan_assembled_cron_prompt(
     assembled: str, job: dict, *, has_skills: bool = False, has_injected_data: bool = False,
     user_prompt: Optional[str] = None,
+    source_components: Optional[list[tuple[str, str, bool]]] = None,
 ) -> str:
     """Scan the assembled cron prompt for injection; raise ``CronPromptInjectionBlocked`` on a hit.
     Needed because skill content is loaded from disk at runtime (never scanned at create/update)
@@ -322,8 +341,32 @@ def _scan_assembled_cron_prompt(
         logger.warning(
             "Cron job '%s': assembled prompt blocked by injection scanner — %s",
             job.get("name") or job.get("id") or "<unknown>", scan_error)
-        raise _sched.CronPromptInjectionBlocked(scan_error)
+        blocked = _sched.CronPromptInjectionBlocked(scan_error)
+        setattr(blocked, "scanner_source", _matching_scanner_sources(source_components))
+        raise blocked
     return assembled
+
+
+def _matching_scanner_sources(
+    source_components: Optional[list[tuple[str, str, bool]]],
+) -> str:
+    """Return component labels that independently trigger the same scanner tier."""
+    if not source_components:
+        return "combined assembled prompt"
+    from tools.cronjob_tools import _scan_cron_prompt
+    from tools.cronjob_prompt_scan import _scan_cron_skill_assembled
+
+    matches = []
+    for label, text, strict in source_components:
+        if not text:
+            continue
+        if strict:
+            found = _scan_cron_prompt(text)
+        else:
+            _cleaned, found = _scan_cron_skill_assembled(text)
+        if found and label not in matches:
+            matches.append(label)
+    return ", ".join(matches) if matches else "combined assembled prompt"
 
 
 def _guard_job_credential_exfil(job: dict) -> None:
