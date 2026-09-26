@@ -324,6 +324,8 @@ def _scan_assembled_cron_prompt(
     STRICT ``_scan_cron_prompt``; skills or injected data → LOOSER ``_scan_cron_skill_assembled``
     (command-shape patterns dropped, invisible unicode sanitized not blocked, so a false positive
     cannot permanently kill a job); injected data without skills also scans ``user_prompt`` STRICT.
+    A loose hit found only in injected DATA is neutralized, not blocked — see
+    ``_neutralize_injected_data_directives``.
 
     Since cron runs non-interactively (auto-approves tool calls), a malicious skill carrying an injection
     payload bypassed every gate. See #3968.
@@ -333,6 +335,10 @@ def _scan_assembled_cron_prompt(
     if has_skills or has_injected_data:
         # The cleaned (sanitized) prompt is what actually runs.
         assembled, scan_error = _scan_cron_skill_assembled(assembled)
+        if scan_error:
+            neutralized = _neutralize_injected_data_directives(assembled, job, source_components)
+            if neutralized is not None:
+                assembled, scan_error = neutralized, ""
         if not scan_error and not has_skills and user_prompt:
             scan_error = _scan_cron_prompt(user_prompt)
     else:
@@ -347,12 +353,58 @@ def _scan_assembled_cron_prompt(
     return assembled
 
 
+# Runtime DATA components: text a job stores or collects (memory notes, facts, feeds) that may
+# legitimately QUOTE a directive phrase. The job notepad and skill content are deliberately absent.
+_INJECTED_DATA_LABELS = frozenset({"pre-run script output", "monitor data", "upstream job output"})
+
+
+def _neutralize_injected_data_directives(
+    assembled: str, job: dict,
+    source_components: Optional[list[tuple[str, str, bool]]],
+) -> Optional[str]:
+    """Replace loose-tier directive matches with a marker when every component that independently
+    matches is injected DATA; return the neutralized prompt, or None when the caller must block.
+
+    2026-09-25: a stored note that QUOTED a directive phrase while documenting the scanner blocked
+    a memory-distill job, and would have every night while the note stayed queued — any job that
+    injects stored text could deadlock the same way. Mirrors the invisible-unicode "sanitize, don't
+    block" choice. Still blocks when the job prompt, notepad or a skill matches, when a match only
+    forms across a component boundary, or when replacement would alter a non-data component.
+    """
+    labels = _matching_scanner_labels(source_components)
+    if not labels or any(label not in _INJECTED_DATA_LABELS for label in labels):
+        return None
+    from tools.cronjob_prompt_scan import (
+        _neutralize_cron_directives, _scan_cron_skill_assembled, _strip_invisible_unicode,
+    )
+    neutralized, pids, count = _neutralize_cron_directives(assembled)
+    # A match starting in the job prompt and ending in the data would cut operator text: block.
+    for label, text, _strict in source_components or []:
+        if label not in _INJECTED_DATA_LABELS and text:
+            if _strip_invisible_unicode(text)[0] not in neutralized:
+                return None
+    if not count or _scan_cron_skill_assembled(neutralized)[1]:
+        return None
+    logger.warning(
+        "Cron job '%s': neutralized %d directive phrase(s) (%s) in injected data (%s) instead of "
+        "blocking the run",
+        job.get("name") or job.get("id") or "<unknown>", count, ", ".join(pids), ", ".join(labels))
+    return neutralized
+
+
 def _matching_scanner_sources(
     source_components: Optional[list[tuple[str, str, bool]]],
 ) -> str:
     """Return component labels that independently trigger the same scanner tier."""
+    return ", ".join(_matching_scanner_labels(source_components)) or "combined assembled prompt"
+
+
+def _matching_scanner_labels(
+    source_components: Optional[list[tuple[str, str, bool]]],
+) -> list[str]:
+    """Labels of the components that independently trigger their scanner tier."""
     if not source_components:
-        return "combined assembled prompt"
+        return []
     from tools.cronjob_tools import _scan_cron_prompt
     from tools.cronjob_prompt_scan import _scan_cron_skill_assembled
 
@@ -366,7 +418,7 @@ def _matching_scanner_sources(
             _cleaned, found = _scan_cron_skill_assembled(text)
         if found and label not in matches:
             matches.append(label)
-    return ", ".join(matches) if matches else "combined assembled prompt"
+    return matches
 
 
 def _guard_job_credential_exfil(job: dict) -> None:

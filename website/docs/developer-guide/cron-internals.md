@@ -307,13 +307,13 @@ Windows continues to use `taskkill /F /T`.
 
 ### Prompt and Report Integrity
 
-Before constructing the agent, the scheduler scans the stored job prompt and per-run context, then scans the assembled prompt containing runtime inputs such as attached skills, pre-run script output, monitor data, upstream `context_from` output, and the job notepad. The scanner applies the policy appropriate to each input class.
+Before constructing the agent, the scheduler scans the stored job prompt and per-run context, then scans the assembled prompt containing runtime inputs such as attached skills, pre-run script output, monitor data, upstream `context_from` output, and the job notepad. The scanner applies the policy appropriate to each input class. When every component that independently matches a directive pattern is injected data (pre-run script output, monitor data or upstream output), each match is replaced with a fixed marker and a warning is logged instead of blocking, so stored text that quotes a directive cannot block a job on every run.
 
 If a scan blocks the run, the agent is not started. The normal failure path saves a `BLOCKED` run report with a `Scanner source` label. The label names matching component(s) without copying matched text; if no component independently explains a match, it identifies the combined assembled prompt.
 
 Jobs may set `report_marker` to require a report heading. If the first response omits it, the scheduler gives the same session one follow-up turn. A failed or silent follow-up preserves the first response. When multiple report headings appear, delivery uses the last valid draft while the saved output retains the full response.
 
-The `morning-briefing` job can include a versioned execution manifest in its script output, delimited by `@@HERMES_CRON_MANIFEST_JSON_BEGIN@@` and `@@HERMES_CRON_MANIFEST_JSON_END@@`. Before saving or delivering the response, the scheduler checks that the briefing accounts for each execution and report file, calls out failed or unknown runs and delivery outcomes, verifies repeat counts, and includes unmatched files or prior-fact correction candidates. A missing manifest, unavailable execution ledger, or unavailable correction scan is surfaced instead of certifying `[SILENT]`.
+The `morning-briefing` job can include a versioned execution manifest in its script output, delimited by `@@HERMES_CRON_MANIFEST_JSON_BEGIN@@` and `@@HERMES_CRON_MANIFEST_JSON_END@@`. Before saving or delivering the response, the scheduler appends any failed or unknown run and any failed, unknown or unconfigured delivery the briefing does not flag, completed runs without a saved report, jobs with fewer report files than executions, unmatched report files, and unreported prior-fact correction candidates. Completed runs with a clean delivery and a saved report need not be named. A missing manifest, unavailable execution ledger, or unavailable correction scan is surfaced instead of certifying `[SILENT]`.
 
 ### Provider Recovery
 

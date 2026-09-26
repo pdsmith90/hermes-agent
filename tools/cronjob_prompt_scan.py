@@ -142,3 +142,20 @@ def _scan_cron_skill_assembled(assembled: str) -> tuple[str, str]:
             len(removed), ", ".join(removed),
         )
     return cleaned, _first_pattern_error(_strip_cron_safe_constructs(cleaned), _CRON_SKILL_ASSEMBLED_PATTERNS)
+
+
+_CRON_DIRECTIVE_MARKER = "[cron scanner: directive phrase removed from injected data]"
+
+
+def _neutralize_cron_directives(text: str) -> tuple[str, list[str], int]:
+    """Replace every loose-tier directive match with a fixed marker, using the same pattern list
+    and flags as ``_scan_cron_skill_assembled`` so the two cannot drift. Returns
+    ``(text, pattern ids replaced, span count)``; the caller decides whether that is allowed."""
+    pids: list[str] = []
+    total = 0
+    for pattern, pid in _CRON_SKILL_ASSEMBLED_PATTERNS:
+        text, count = re.subn(pattern, _CRON_DIRECTIVE_MARKER, text, flags=re.IGNORECASE)
+        if count:
+            pids.append(pid)
+            total += count
+    return text, pids, total

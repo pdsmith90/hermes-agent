@@ -701,32 +701,11 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
             ]
             report_paths = files_by_job.get(job_id, set())
             run_count = len(rows)
-            if not matching_lines:
-                statuses = ",".join(sorted({str(row.get("status") or "unknown") for row in rows}))
-                report_text = f"{len(report_paths)} report file(s)" if report_paths else "no report file"
-                details = []
-                for row in rows:
-                    status = str(row.get("status") or "unknown").lower()
-                    delivery = str(row.get("delivery") or "not recorded").lower()
-                    issue = str(row.get("issue") or "details in hermes cron runs")
-                    if status in ("failed", "unknown"):
-                        details.append(f"issue={issue}, delivery={delivery}")
-                    elif delivery in ("failed", "unknown", "not_configured"):
-                        details.append(f"delivery={delivery}")
-                gaps.append(
-                    f"{name}: {run_count} run(s), status={statuses}, {report_text}, omitted from the summary"
-                    + (f" ({'; '.join(details)})" if details else "")
-                )
-            elif run_count > 1:
-                count_pattern = re.compile(
-                    rf"\bran\s*(?:{run_count}\s*x|x\s*{run_count})\b|\b{run_count}\s+runs?\b",
-                    re.IGNORECASE,
-                )
-                if not any(count_pattern.search(line) for line in matching_lines):
-                    gaps.append(
-                        f"{name}: ran {run_count}x and has {len(report_paths)} report files, "
-                        "but the summary does not identify the repeat"
-                    )
+            # Only problems are appended. A completed run with a clean delivery that the briefing
+            # does not name is routine work, not a gap: the 2026-09-24 replay would have appended
+            # three such jobs to the phone, and a repeat run whose reports all exist needs no
+            # "ran 2x" wording either.
+            unflagged = "not flagged" if matching_lines else "omitted from the summary"
 
             if run_count > 1 and len(report_paths) < run_count:
                 gaps.append(
@@ -738,21 +717,21 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
                 status = str(row.get("status") or "unknown").lower()
                 delivery = str(row.get("delivery") or "not recorded").lower()
                 issue = str(row.get("issue") or "details in hermes cron runs")
-                if matching_lines and status in ("failed", "unknown") and not any(
+                if status in ("failed", "unknown") and not any(
                     re.search(r"\b(error|failed|failure|blocked|unavailable|unknown)\b", line, re.I)
                     for line in matching_lines
                 ):
                     gaps.append(
                         f"{name}: status={status}, issue={issue}, delivery={delivery}, "
-                        f"reports={'none' if not report_paths else len(report_paths)}; not flagged"
+                        f"reports={'none' if not report_paths else len(report_paths)}; {unflagged}"
                     )
-                if matching_lines and delivery in ("failed", "unknown", "not_configured") and not any(
+                if delivery in ("failed", "unknown", "not_configured") and not any(
                     "deliver" in line.casefold()
                     and re.search(r"\b(failed|failure|unknown|not configured|unresolved)\b", line, re.I)
                     for line in matching_lines
                 ):
-                    gaps.append(f"{name}: delivery={delivery}; job status={status}, but not flagged")
-                if matching_lines and status == "completed" and not report_paths:
+                    gaps.append(f"{name}: delivery={delivery}; job status={status}, but {unflagged}")
+                if status == "completed" and not report_paths:
                     gaps.append(f"{name}: completed execution has no saved report file")
 
         for orphan in manifest.get("unmatched_report_files", []):
