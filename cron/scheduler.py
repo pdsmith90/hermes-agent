@@ -645,24 +645,32 @@ def _strip_report_preamble(job: dict, text: str) -> str:
     return "".join(lines[start:])
 
 
+_MANIFEST_BEGIN_LINE = re.compile(r"^[ \t]*@@HERMES_CRON_MANIFEST_JSON_BEGIN@@[ \t]*$", re.MULTILINE)
+_MANIFEST_END_LINE = re.compile(r"^[ \t]*@@HERMES_CRON_MANIFEST_JSON_END@@[ \t]*$", re.MULTILINE)
+
+
 def _morning_briefing_manifest(prompt: str) -> Optional[dict]:
-    begin = "@@HERMES_CRON_MANIFEST_JSON_BEGIN@@"
-    end = "@@HERMES_CRON_MANIFEST_JSON_END@@"
-    if prompt.count(begin) != 1 or prompt.count(end) != 1:
-        return None
-    start = prompt.find(begin) + len(begin)
-    stop = prompt.find(end, start)
-    if stop < 0:
-        return None
-    try:
-        manifest = json.loads(prompt[start:stop].strip())
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(manifest, dict) or manifest.get("version") != 1:
-        return None
-    if not isinstance(manifest.get("executions"), list) or not isinstance(manifest.get("report_files"), list):
-        return None
-    return manifest
+    """The manifest block the pre-run script printed, or None.
+
+    A marker counts only on a line of its own: the job prompt may mention one in prose
+    (STEP 1 quoted the BEGIN marker until 2026-09-26, and that morning's briefing parsed
+    nothing because the assembled prompt then held two). Every begin line is tried and
+    the first block that validates wins.
+    """
+    for begin in _MANIFEST_BEGIN_LINE.finditer(prompt):
+        end = _MANIFEST_END_LINE.search(prompt, begin.end())
+        if end is None:
+            return None
+        try:
+            manifest = json.loads(prompt[begin.end():end.start()].strip())
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(manifest, dict) or manifest.get("version") != 1:
+            continue
+        if not isinstance(manifest.get("executions"), list) or not isinstance(manifest.get("report_files"), list):
+            continue
+        return manifest
+    return None
 
 
 def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: str) -> str:

@@ -17,6 +17,7 @@ import pytest
 from cron.scheduler import (
     _normalize_report_text,
     _enforce_morning_briefing_coverage,
+    _morning_briefing_manifest,
     _report_gate_missing_marker,
     _strip_report_preamble,
     run_job,
@@ -30,6 +31,24 @@ def _manifest_prompt(manifest):
         + json.dumps(manifest)
         + "\n@@HERMES_CRON_MANIFEST_JSON_END@@\nsuffix"
     )
+
+
+def _complete_manifest():
+    return {
+        "version": 1,
+        "date": "2026-09-25",
+        "execution_ledger_available": True,
+        "executions": [
+            {"job_id": "daily1234567", "name": "daily-review", "status": "completed",
+             "delivery": "suppressed", "issue": None,
+             "report_files": ["cron/output/daily1234567/2026-09-25_02-13-38.md"]},
+        ],
+        "report_files": [
+            {"job_id": "daily1234567", "name": "daily-review",
+             "path": "cron/output/daily1234567/2026-09-25_02-13-38.md"},
+        ],
+        "unmatched_report_files": [],
+    }
 
 
 class TestMorningBriefingCoverageGate:
@@ -301,6 +320,38 @@ class TestMorningBriefingCoverageGate:
             {"name": "morning-briefing"}, "no manifest", "[SILENT]")
         assert result.startswith("Morning Briefing —")
         assert "inventory could not be verified" in result
+
+    def test_manifest_is_found_when_the_job_prompt_mentions_the_marker(self):
+        # 2026-09-26 07:30: STEP 1 of the job prompt quoted `@@HERMES_CRON_MANIFEST_JSON_BEGIN@@`
+        # after the real block, the assembled prompt held two BEGIN markers, the parser returned
+        # None, and the phone got "the execution manifest is unavailable" instead of the check.
+        manifest = _complete_manifest()
+        prompt = _manifest_prompt(manifest) + (
+            "\nSTEP 1 — The `@@HERMES_CRON_MANIFEST_JSON_BEGIN@@` block is validator input; "
+            "do not copy its markers or JSON into Telegram."
+        )
+        assert _morning_briefing_manifest(prompt) == manifest
+        response = "Morning Briefing — 2026-09-25\n\n- daily-review: ACTIVITY recorded.\n"
+        assert _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, prompt, response) == response
+
+    def test_manifest_is_found_when_the_mention_precedes_the_block(self):
+        manifest = _complete_manifest()
+        prompt = "Read the @@HERMES_CRON_MANIFEST_JSON_BEGIN@@ block below.\n" + _manifest_prompt(manifest)
+        assert _morning_briefing_manifest(prompt) == manifest
+
+    def test_a_marker_line_without_a_valid_block_is_skipped(self):
+        manifest = _complete_manifest()
+        prompt = (
+            "@@HERMES_CRON_MANIFEST_JSON_BEGIN@@\nnot json\n@@HERMES_CRON_MANIFEST_JSON_END@@\n"
+            + _manifest_prompt(manifest)
+        )
+        assert _morning_briefing_manifest(prompt) == manifest
+
+    def test_a_prose_mention_alone_is_no_manifest(self):
+        assert _morning_briefing_manifest(
+            "prose mentions @@HERMES_CRON_MANIFEST_JSON_BEGIN@@ and nothing else") is None
+
 
 
 class TestMarkerHelper:
