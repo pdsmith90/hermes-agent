@@ -418,7 +418,20 @@ _CONTRACTION_HEADS = frozenset(("s", "t", "ll", "re", "ve", "d", "m"))
 
 
 def _clamp_trust(value: float) -> float:
-    return max(_TRUST_MIN, min(_TRUST_MAX, value))
+    # ROUNDED, not only clamped. Trust moves by float addition, and the
+    # decimal steps are not exact in binary: 0.7 + -0.4 is 0.29999999999999993,
+    # which fails every `trust_score >= 0.3` predicate — the default min_trust
+    # of both search lanes — so a fact demoted to sit exactly ON the floor
+    # instead vanished from search. On 2026-09-27 the live store held 168 of
+    # 2548 rows off the 0.05 grid by at most 2.2e-16, 11 of them synthesis
+    # facts stranded at 0.29999999999999993 by update_fact(trust_delta=-0.4).
+    # Every write of trust_score goes through here (add_fact via
+    # default_trust, update_fact, record_feedback). Six decimal places sits
+    # ten orders of magnitude above that noise yet still keeps a delta finer
+    # than the code's own 0.05 steps: trust_delta is a free float on the
+    # fact_store tool, so snapping to the 0.05 grid would change what a
+    # caller asked for, not just remove the noise.
+    return round(max(_TRUST_MIN, min(_TRUST_MAX, value)), 6)
 
 
 def _is_entity_like(name: str) -> bool:
@@ -956,9 +969,10 @@ class MemoryStore:
                     if row is None:
                         break
                     current = float(row["trust_score"])
-                    # Epsilon, not a bare <=. Repeated -0.10 steps land on
-                    # 0.30000000000000004, which compares GREATER than 0.30, so
-                    # a bare test lets the next retraction punch through.
+                    # Epsilon, not a bare <=. Rows written before
+                    # _clamp_trust rounded (103 live at 0.30000000000000004 on
+                    # 2026-09-27) compare GREATER than 0.30, so a bare test
+                    # lets the next retraction punch through.
                     if current <= _SUPERSESSION_FLOOR + 1e-9:
                         break
                     if current + _UNHELPFUL_DELTA < _SUPERSESSION_FLOOR - 1e-9:
