@@ -474,12 +474,22 @@ class MemoryStore:
         db_path: "str | Path | None" = None,
         default_trust: float = 0.5,
         hrr_dim: int = 1024,
+        readonly: bool = False,
     ) -> None:
+        """*readonly* opens the store for a viewer: a mode=ro connection that
+        SQLite itself refuses to write through, no schema init or migration (a
+        reader must never be the one to migrate a store), and no retrieval
+        counting. The memory wiki's ranked search is the caller: a person
+        browsing must not feed retrieval_count, which the metabolism reads as
+        agent usage to decide what is unused.
+        """
         if db_path is None:
             from hermes_constants import get_hermes_home
             db_path = str(get_hermes_home() / "memory_store.db")
         self.db_path = Path(db_path).expanduser()
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.readonly = readonly
+        if not readonly:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.default_trust = _clamp_trust(default_trust)
         self.hrr_dim = hrr_dim
         self._hrr_available = hrr._HAS_NUMPY
@@ -492,11 +502,19 @@ class MemoryStore:
             self._key = str(self.db_path.resolve())
         except OSError:
             self._key = str(self.db_path)
+        # A read-only store registers under its own key: sharing the writer's
+        # connection would hand it write access, and handing a writer this
+        # mode=ro one would break every write in the process. The suffix keeps
+        # the path as a prefix, so release_all_under() still finds it.
+        target = self._key
+        if readonly:
+            self._key += "#ro"
         with MemoryStore._shared_guard:
             entry = MemoryStore._shared.get(self._key)
             if entry is None:
                 conn = sqlite3.connect(
-                    self._key,
+                    Path(target).absolute().as_uri() + "?mode=ro" if readonly else target,
+                    uri=readonly,
                     check_same_thread=False,
                     timeout=10.0,
                     # Autocommit: every statement is its own transaction, so a
@@ -506,7 +524,10 @@ class MemoryStore:
                     isolation_level=None,
                 )
                 conn.row_factory = sqlite3.Row
-                entry = {"conn": conn, "lock": threading.RLock(), "refs": 0, "ready": False}
+                # _init_db sets WAL mode, creates tables and runs migrations —
+                # all writes — so a read-only connection is ready as opened.
+                entry = {"conn": conn, "lock": threading.RLock(), "refs": 0,
+                         "ready": readonly}
                 MemoryStore._shared[self._key] = entry
             entry["refs"] += 1
             self._entry = entry
@@ -1052,7 +1073,8 @@ class MemoryStore:
         """Full-text search over facts using FTS5.
 
         Returns a list of fact dicts ordered by FTS5 rank, then trust_score
-        descending. Also increments retrieval_count for matched facts.
+        descending. Also increments retrieval_count for matched facts, unless
+        the store is read-only (see __init__).
         """
         with self._lock:
             query = query.strip()
@@ -1089,7 +1111,7 @@ class MemoryStore:
             rows = self._conn.execute(sql, params).fetchall()
             results = [self._row_to_dict(r) for r in rows]
 
-            if results:
+            if results and not self.readonly:
                 ids = [r["fact_id"] for r in results]
                 placeholders = ",".join("?" * len(ids))
                 self._conn.execute(
@@ -1602,8 +1624,11 @@ class MemoryStore:
         this existed, ambient prefetch recall was invisible: a fact could be
         injected into context every day and still read retrieval_count=0,
         which is how 296 of 455 facts came to look unread.
+
+        A read-only store counts nothing: its reader is a person browsing,
+        not an agent recalling (see __init__).
         """
-        if not fact_ids:
+        if not fact_ids or self.readonly:
             return
         with self._lock:
             placeholders = ",".join("?" * len(fact_ids))
