@@ -14,7 +14,6 @@ pytest.importorskip("numpy")  # retrieval module imports numpy indirectly
 from plugins.memory.holographic.retrieval import FactRetriever
 from plugins.memory.holographic.store import MemoryStore
 
-
 # ---------------------------------------------------------------------------
 # _sanitize_fts_query — unit tests (no DB required)
 # ---------------------------------------------------------------------------
@@ -115,7 +114,6 @@ def retriever_with_facts(tmp_path):
     yield retriever
     store.close()
 
-
 def test_prefetch_recovers_prose_query(retriever_with_facts):
     """A natural-language query should now match the relevant fact.
 
@@ -158,40 +156,6 @@ def test_search_bumps_retrieval_count(retriever_with_facts):
 # ---------------------------------------------------------------------------
 
 from plugins.memory.holographic import holographic as hrr
-
-
-@pytest.fixture
-def hoisted_retriever(tmp_path):
-    """30 facts with HRR vectors, default dim (smaller dims trip an
-    inhomogeneous-shape edge in the fact encoder).
-
-    NOTE: a real tmp_path db, NOT ":memory:" — MemoryStore resolves the
-    path and shares one process-wide connection per file, so ":memory:"
-    becomes a literal ./:memory: file that leaks state across runs (and
-    the NULL-vector test below would permanently corrupt it)."""
-    store = MemoryStore(str(tmp_path / "hoist_store.db"))
-    for i in range(30):
-        store.add_fact(
-            content=f"deploy target {i} setting alpha beta gamma option {i % 7}",
-            category="fact" if i % 2 else "preference",
-            tags=f"entity_{i % 5} deploy",
-        )
-    retriever = FactRetriever(store=store)
-    yield retriever
-    store.close()
-
-
-def _counting_spy(monkeypatch, attr):
-    calls = []
-    real = getattr(hrr, attr)
-
-    def wrapper(*args, **kwargs):
-        calls.append(args)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(hrr, attr, wrapper)
-    return calls
-
 
 def test_encode_functions_are_deterministic():
     """Soundness premise of the hoists: same input -> identical vector."""

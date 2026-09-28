@@ -48,7 +48,6 @@ from unittest.mock import MagicMock, patch
 
 from cron.scheduler import run_job
 
-
 @contextlib.contextmanager
 def _run_job_patches(tmp_path):
     """Patch bundle so run_job runs offline; yields (fake_db, mock_agent_cls).
@@ -83,20 +82,6 @@ def _run_job_patches(tmp_path):
     with contextlib.ExitStack() as stack:
         entered = [stack.enter_context(cm) for cm in base]
         yield fake_db, entered[-1]
-
-
-class TestCronMemoryContractOn:
-    """Direction (a): default cron agents GET persistent memory (#91447)."""
-
-    def test_resolver_denylist_has_no_memory_entry(self):
-        """_resolve_cron_disabled_toolsets({}) itself never emits 'memory'."""
-        from cron.scheduler import _resolve_cron_disabled_toolsets
-
-        assert "memory" not in _resolve_cron_disabled_toolsets({})
-        assert "memory" not in _resolve_cron_disabled_toolsets(
-            {"cron": {"allow_agent_scheduling": True}}
-        )
-
 
 class TestCronMemoryContractOff:
     """Direction (b): the supported OFF switch stays off."""

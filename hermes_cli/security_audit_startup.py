@@ -53,7 +53,7 @@ def _iter_sshd_config_lines() -> list[str]:
     lines: list[str] = []
     for p in _sshd_config_paths():
         try:
-            raw_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+            raw_lines = p.read_text(encoding="utf-8-sig", errors="replace").splitlines()
         except Exception:
             continue
         lines.extend(s for s in map(str.strip, raw_lines) if s and not s.startswith("#"))
