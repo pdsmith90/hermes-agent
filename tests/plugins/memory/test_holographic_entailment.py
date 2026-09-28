@@ -289,8 +289,14 @@ class TestQueryForm:
 
         path = os.path.expanduser(
             "~/.hermes/scripts/model-battery/memory-probes.json")
-        if not os.path.exists(path):
-            pytest.skip("probe set not present")
+        try:
+            present = os.path.exists(path)
+        except AssertionError:
+            # tests/home_io_guard refuses every read from the real Hermes home (upstream,
+            # 2026-09): the calibration set lives there and is not part of the checkout.
+            present = False
+        if not present:
+            pytest.skip("probe set not present or not readable under the test guard")
         probes = json.load(open(path))["probes"]
         rejected = [p["id"] for p in probes if not _is_question(p["question"])]
         assert not rejected, f"calibration probes no longer judged: {rejected}"
