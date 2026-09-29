@@ -416,6 +416,36 @@ use uses used using run runs ran add adds added see also new only all both more 
 # lowercase and only as a leading word, so "T Tauri" / "B Ring" are unaffected.
 _CONTRACTION_HEADS = frozenset(("s", "t", "ll", "re", "ve", "d", "m"))
 
+# Tag vocabulary and status words that reach the extractor through the tags
+# path (and, capitalised mid-sentence, through the single-word rule). They are
+# metadata about a fact, not its subject: measured 2026-09-28, `verified`,
+# `distilled`, `claude-memory-distilled`, `paper`, `PARTIALLY-CONFIRMED`,
+# `verified:2026-09-13`, `answered` and `daily` all sat among the 25
+# highest-degree nodes of a 15,178-entity graph, so about()/related_to() on
+# any real subject walked through them into unrelated facts. Rejected for NEW
+# writes only — existing rows are never GC'd (MEMORY-SYSTEM.md §11). Real
+# hyphenated tags ("llama-swap", "open-question" as a topic) are unaffected
+# except where they ARE the category/marker vocabulary listed here.
+_TAG_TOKEN_STOP = frozenset("""
+lesson project researched paper activity synthesis memory-entry open-question
+hypothesis tool general user_pref outage
+confirmed partially-confirmed refuted answered unverified verified stale
+superseded corrected synthesized cluster dream
+distilled claude-memory claude-memory-distilled claude-memory-gone
+claude-memory-ingest needs-review stale-candidate unverifiable
+coverage-verified promotion-declined implement-candidate implemented
+wont-implement parked-stale strategy
+daily weekly monthly nightly hourly
+""".split())
+# `<prefix>:<value>` stamps: verified:2026-09-13, written:2026-09-12,
+# source:claude-code, audited:2026-09-20 … A real identifier with a colon
+# (arXiv:2607.19083) carries an uppercase letter and a prefix outside this list.
+_TAG_STAMP_PREFIXES = frozenset((
+    "verified", "audited", "audit-fixed", "reader-fixed", "hand-fixed",
+    "coverage-checked", "promotion-declined", "written", "source", "distilled",
+    "expsrc", "dup-of-design", "daily-review", "retired", "audience",
+))
+
 
 def _clamp_trust(value: float) -> float:
     # ROUNDED, not only clamped. Trust moves by float addition, and the
@@ -437,6 +467,12 @@ def _clamp_trust(value: float) -> float:
 def _is_entity_like(name: str) -> bool:
     """True if a candidate looks like a name rather than a fragment of prose."""
     if not (_ENTITY_MIN_LEN <= len(name) <= _ENTITY_MAX_LEN):
+        return False
+    low = name.lower()
+    if low in _TAG_TOKEN_STOP or low in CROSS_JOB_MARKERS:
+        return False
+    head, sep, _ = low.partition(":")
+    if sep and head in _TAG_STAMP_PREFIXES:
         return False
     words = name.split()
     if len(words) > 1 and (

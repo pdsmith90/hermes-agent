@@ -111,8 +111,11 @@ class TestSnakeCaseIdentifiers:
 
 class TestTagEntities:
     def test_tag_parse(self):
-        assert _tag_entities("hermes, llama-swap , open-question") == [
-            "hermes", "llama-swap", "open-question"
+        # "open-question" was the third example until 2026-09-28; category names
+        # are tag VOCABULARY now and no longer become entities (see
+        # test_holographic_review_20260928.py), so a real hyphenated tag stands in.
+        assert _tag_entities("hermes, llama-swap , zotero-lightrag") == [
+            "hermes", "llama-swap", "zotero-lightrag"
         ]
         assert _tag_entities("") == []
         assert _tag_entities("a") == []  # below min length

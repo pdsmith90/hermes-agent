@@ -81,6 +81,20 @@ logger = logging.getLogger(__name__)
 _DENSE_SHARE = {"lexical": 0.10, "semantic": 0.50}
 _DENSE_K = {"lexical": 4, "semantic": 24}
 
+# FTS candidate pool = limit × this. A literal 3 ("limit * 3") from the first
+# version; made a constant on 2026-09-28 because the pool stopped scaling with
+# the corpus: at 2,589 facts BM25 pool recall@24 had slipped 0.82 → 0.73 and
+# the FTS ∪ dense union 0.98 → 0.91 (56 probes, scripts/memory-retrieval-eval.py).
+# The 2026-09-05 measurement that ×6 bought nothing was made on a 1,037-fact
+# store. Widening costs reranker time only (the same pool is rescored), so the
+# value is decided by the eval, not by hand. MEASURED 2026-09-28 on the 2,589-fact
+# snapshot, decay off, 56 probes: ×5 left pool recall at exactly 0.73/0.91 and
+# hit@5 unchanged while hit@1 fell 0.57 → 0.52 and MRR 0.686 → 0.658 — the misses
+# are vocabulary misses (gold shares no FTS term and sits outside the dense
+# top-k), not depth. So 3 stays; scripts/memory-retrieval-eval.py reports pool
+# recall at limit*3 and assumes this value.
+_FTS_POOL_MULT = 3
+
 # Reciprocal-rank-fusion constant for stage 3 (2026-09-05).
 #
 # Until now the cross-encoder REPLACED the blend ordering outright, throwing
@@ -524,7 +538,7 @@ class FactRetriever:
         0. Dense candidates (optional): embed the query once and take the top
            _DENSE_K[shape] by cosine over the whole corpus, UNIONed with stage 1.
            This is candidate GENERATION, not reranking — see the module header.
-        1. FTS5 search: Get limit*3 candidates from SQLite full-text search
+        1. FTS5 search: Get limit*_FTS_POOL_MULT candidates from SQLite full-text search
         2. Jaccard boost: Token overlap between query and fact content
         3. Trust weighting: final_score = relevance * trust_score
         4. Temporal decay (optional): decay = 0.5^(age_days / half_life)
@@ -549,7 +563,7 @@ class FactRetriever:
         shape = _query_shape(query)
 
         # Stage 1: Get FTS5 candidates (more than limit for reranking headroom)
-        candidates = self._fts_candidates(query, category, min_trust, limit * 3)
+        candidates = self._fts_candidates(query, category, min_trust, limit * _FTS_POOL_MULT)
 
         # Stage 0: dense candidates, UNIONed in. An FTS row wins any collision
         # because it is the one carrying fts_rank; the dense score is looked up

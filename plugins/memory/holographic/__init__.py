@@ -522,6 +522,12 @@ def _strip_tool_call_tail(args: dict) -> None:
         args[key] = cleaned
 
 
+# Per-turn ambient injection window and the categories kept out of it (see
+# prefetch()). "activity" = the daily ACTIVITY digests written by daily-review.
+_PREFETCH_LIMIT = 5
+_PREFETCH_EXCLUDE = frozenset({"activity"})
+
+
 class HolographicMemoryProvider(MemoryProvider):
     """Holographic memory with structured facts, entity resolution, and HRR retrieval."""
 
@@ -612,7 +618,20 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._retriever or not query:
             return ""
         try:
-            results = self._retriever.search(query, min_trust=self._min_trust, limit=5)
+            # Over-fetch, then drop the categories ambient injection must not
+            # carry, then cut to the five-row window. Measured 2026-09-28 over 30
+            # days of Claude Code prompts: 18% of every ambient row was an ACTIVITY
+            # daily digest and three of the five most-injected facts were digests —
+            # a digest names every project and tool of its day, so BM25 and the
+            # cross-encoder both rate it "about" almost any prompt. Explicit
+            # fact_store search/list still return them; only the per-turn path
+            # filters (the Claude Code recall hook applies the same exclusion).
+            results = self._retriever.search(
+                query, min_trust=self._min_trust, limit=_PREFETCH_LIMIT + 2
+            )
+            results = [
+                r for r in results if r.get("category") not in _PREFETCH_EXCLUDE
+            ][:_PREFETCH_LIMIT]
             if not results:
                 return ""
             lines = []
