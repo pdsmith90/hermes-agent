@@ -1808,6 +1808,38 @@ MEMORY_GUARD_MB_PER_WORKER = 512
 DERIVED_MAX_IN_PROGRESS_FLOOR = 2
 DERIVED_MAX_IN_PROGRESS_CEILING = 8
 
+# The gateway dispatcher ticks every minute, so a host that stays under pressure for
+# hours (a long batch job, a swapped-out desktop) would otherwise put the same
+# WARNING in the log on every tick. Log the ENTRY into a restricted state once and
+# the return to normal once; repeats inside an episode go to DEBUG. The per-tick
+# ``DispatchResult.memory_pressure`` field is unaffected.
+_last_logged_pressure: Optional[str] = None
+
+
+def _log_pressure_transition(pressure: str) -> None:
+    global _last_logged_pressure
+    restricted = pressure in ("critical", "elevated")
+    if pressure == _last_logged_pressure:
+        if restricted:
+            _kb._log.debug("kanban dispatch: system memory pressure still %s", pressure)
+        return
+    was_restricted = _last_logged_pressure in ("critical", "elevated")
+    _last_logged_pressure = pressure
+    if pressure == "critical":
+        _kb._log.warning(
+            "kanban dispatch: system memory pressure is critical; spawning no new "
+            "workers until it eases (deferred, not dropped; logged once per episode)"
+        )
+    elif pressure == "elevated":
+        _kb._log.warning(
+            "kanban dispatch: system memory pressure is elevated; limiting to at most "
+            "1 new worker per tick until it eases (logged once per episode)"
+        )
+    elif was_restricted:
+        _kb._log.info(
+            "kanban dispatch: system memory pressure back to %s; spawn cap lifted", pressure
+        )
+
 
 def _system_memory_sample() -> dict:
     """Best-effort system memory snapshot (KiB values), ``{}`` when unknown.
@@ -2239,20 +2271,13 @@ def _tick_spawn_budget(
     # Reclaim/promotion already ran, so bookkeeping stays live; deferred tasks
     # wait for a later tick. "unknown" imposes no restriction.
     pressure = _memory_pressure_level()
+    _log_pressure_transition(pressure)
     if pressure == "critical":
         result.memory_pressure = pressure
-        _kb._log.warning(
-            "kanban dispatch: system memory pressure is critical; "
-            "spawning no new workers this tick (deferred, not dropped)"
-        )
         return False, None
     if pressure == "elevated":
         result.memory_pressure = pressure
         if spawn_budget is None or spawn_budget > 1:
-            _kb._log.warning(
-                "kanban dispatch: system memory pressure is elevated; "
-                "limiting to at most 1 new worker this tick"
-            )
             spawn_budget = 1
     return True, spawn_budget
 

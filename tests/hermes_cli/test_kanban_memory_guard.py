@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import logging
+
 import pytest
 
 from hermes_cli import kanban_db as kb
@@ -238,3 +240,48 @@ def test_dispatch_critical_pressure_still_runs_reclaim_bookkeeping(
     assert res.memory_pressure == "critical"
     assert row is not None
     assert row.status == "ready"
+
+
+# ---------------------------------------------------------------------------
+# pressure logging: once per episode, not once per tick
+# ---------------------------------------------------------------------------
+
+
+def _tick_under(monkeypatch, level):
+    monkeypatch.setattr(kbd, "_system_memory_sample", lambda: _pressure_sample(level))
+    with kbc.connect() as conn:
+        kb.create_task(conn, title=f"task-{level}", assignee="alice")
+        return kbd.dispatch_once(conn, spawn_fn=lambda task, workspace, board=None: 42)
+
+
+def _pressure_records(caplog):
+    return [(r.levelno, r.getMessage()) for r in caplog.records
+            if "memory pressure" in r.getMessage()]
+
+
+def test_pressure_warning_logged_once_per_episode(
+    kanban_home, all_assignees_spawnable, monkeypatch, caplog,
+):
+    monkeypatch.setattr(kbd, "_last_logged_pressure", None)
+    caplog.set_level(logging.DEBUG, logger=kb._log.name)
+    for _ in range(3):
+        assert _tick_under(monkeypatch, "elevated").memory_pressure == "elevated"
+    warnings = [m for lvl, m in _pressure_records(caplog) if lvl == logging.WARNING]
+    assert len(warnings) == 1 and "elevated" in warnings[0]
+    # the repeats are still visible, just not at WARNING
+    assert sum(1 for lvl, _ in _pressure_records(caplog) if lvl == logging.DEBUG) == 2
+
+
+def test_pressure_recovery_logged_once_and_next_episode_warns_again(
+    kanban_home, all_assignees_spawnable, monkeypatch, caplog,
+):
+    monkeypatch.setattr(kbd, "_last_logged_pressure", None)
+    caplog.set_level(logging.DEBUG, logger=kb._log.name)
+    for level in ("critical", "critical", "ok", "ok", "elevated"):
+        _tick_under(monkeypatch, level)
+    visible = [(lvl, m) for lvl, m in _pressure_records(caplog) if lvl >= logging.INFO]
+    assert [lvl for lvl, _ in visible] == [logging.WARNING, logging.INFO, logging.WARNING]
+    assert "critical" in visible[0][1]
+    assert "back to ok" in visible[1][1]
+    assert "elevated" in visible[2][1]
+
