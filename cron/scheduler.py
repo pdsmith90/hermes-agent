@@ -866,12 +866,26 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
 #: Wall-clock cap on the follow-up turn. The first turn is guarded by the
 #: inactivity watchdog; the follow-up is one bounded continuation.
 _REPORT_GATE_TIMEOUT_S = 600.0
+# 2026-10-04: a second follow-up when the first came back without the marker (or empty). topic-deep-dive's
+# first follow-up was itself a reasoning-only stop — 98 tokens of planning, no tool call — and the night's
+# slot was lost. A [SILENT] answer, a timeout or an exception still end the gate at once.
+_REPORT_GATE_MAX_FOLLOW_UPS = 2
 #: A later header line counts as a redraft only when at least this many non-blank lines
 #: follow it — fewer is a sign-off, not a report.
 _REPORT_MIN_LINES = 3
 
 
-def _report_gate_follow_up(marker: str) -> str:
+def _report_gate_follow_up(marker: str, attempt: int = 1) -> str:
+    if attempt > 1:
+        # The first nudge got another tool-less planning turn (2026-10-04, topic-deep-dive):
+        # name the failure mode and make this the last chance.
+        return (
+            f"REPORT GATE, LAST CALL: your previous two messages contained neither a tool call nor "
+            f"the report — planning text runs nothing, and a text turn with no tool call ends this "
+            f"run. Either call the tools you planned NOW, or write the complete final report as plain "
+            f"text, starting with the mandated header \"{marker} …\". There is no further turn. Do not "
+            f"explain this message."
+        )
     return (
         f"REPORT GATE: your last message was not the report — it does not contain "
         f"\"{marker}\". A text turn with no tool call ends this run, so nothing after "
@@ -3005,11 +3019,14 @@ def run_job(
             agent, prompt, job, job_id, job_name, scope.task_id, cancel_event,
             worker_state=_worker_state)
         final_response = _final_response_from_result(result, job_id, job_name, AIAgent)
-        # REPORT GATE (2026-09-06): one follow-up turn when the final text is not the report —
-        # see _report_gate_missing_marker. Only ``final_response`` is replaced; ``result`` stays
-        # the first turn's so the usage audit keeps its accounting. The follow-up runs in the
-        # same session (conversation_history carried over), so the fact-write ledger sees
-        # anything it writes.
+        # REPORT GATE (2026-09-06; up to two follow-ups since 2026-10-04): a follow-up turn when the
+        # final text is not the report — see _report_gate_missing_marker. Only ``final_response`` is
+        # replaced; ``result`` stays the first turn's so the usage audit keeps its accounting. Each
+        # follow-up runs in the same session (conversation_history carried over), so the fact-write
+        # ledger sees anything it writes. The SECOND follow-up is granted only when the first came
+        # back without the marker or with nothing at all (2026-10-04: topic-deep-dive's first
+        # follow-up was itself a reasoning-only stop and the night's slot was lost); a [SILENT]
+        # answer, a timeout or an exception end the gate at once.
         _gate_note = ""
         _gate_marker = _report_gate_missing_marker(job, final_response)
         if _gate_marker:
@@ -3017,64 +3034,82 @@ def run_job(
                 "Job '%s': final response lacks report marker %r (%d chars) — granting one follow-up turn",
                 job_name, _gate_marker, len(final_response),
             )
-            _second = None
-            _gate_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            try:
-                _gate_future = _gate_pool.submit(
-                    contextvars.copy_context().run,
-                    agent.run_conversation,
-                    _report_gate_follow_up(_gate_marker),
-                    conversation_history=result.get("messages") or None,
-                    task_id=scope.task_id,
-                )
-                _second = _gate_future.result(timeout=_REPORT_GATE_TIMEOUT_S)
-            except concurrent.futures.TimeoutError:
-                request_hard_interrupt(agent, "Cron report-gate follow-up timed out")
-                _gate_note = (
-                    f"fired (marker \"{_gate_marker}\" missing); the follow-up timed "
-                    f"out after {int(_REPORT_GATE_TIMEOUT_S)}s — first response kept"
-                )
-            except Exception as _gate_exc:  # noqa: BLE001 — never take the run down
-                logger.warning("Job '%s': report-gate follow-up failed: %s", job_name, _gate_exc)
-                _gate_note = (
-                    f"fired (marker \"{_gate_marker}\" missing); the follow-up failed "
-                    f"({type(_gate_exc).__name__}) — first response kept"
-                )
-            finally:
-                _gate_pool.shutdown(wait=False, cancel_futures=True)
-            _second_text = ""
-            if isinstance(_second, dict) and _second.get("failed") is not True:
-                _second_text = str(_second.get("final_response") or "").strip()
-                if _second_text == "(No response generated)":
-                    _second_text = ""
-            if _second_text and _is_cron_silence_response(_second_text):
-                # 2026-09-21 retrieval-audit: turn 1 was a 1406-char report ("13 PASS, 0 FAIL",
-                # one repair) missing only the literal header; the nudge got "[SILENT]" back,
-                # and because silence sentinels bypass the marker check it replaced the report
-                # in the output file and the morning briefing. The gate exists to recover a
-                # report, never to lose one: a silence answer to the nudge keeps the first
-                # response, flagged like an empty follow-up.
-                _gate_note = (
-                    f"fired (marker \"{_gate_marker}\" missing); the follow-up answered "
-                    f"[SILENT] — first response kept"
-                )
+            _history = result.get("messages") or None
+            _kept_label = "first response"   # what is delivered when a follow-up yields nothing usable
+            for _attempt in range(1, _REPORT_GATE_MAX_FOLLOW_UPS + 1):
+                _nth = "the follow-up" if _attempt == 1 else "the second follow-up"
+                _second = None
+                _gate_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                try:
+                    _gate_future = _gate_pool.submit(
+                        contextvars.copy_context().run,
+                        agent.run_conversation,
+                        _report_gate_follow_up(_gate_marker, attempt=_attempt),
+                        conversation_history=_history,
+                        task_id=scope.task_id,
+                    )
+                    _second = _gate_future.result(timeout=_REPORT_GATE_TIMEOUT_S)
+                except concurrent.futures.TimeoutError:
+                    request_hard_interrupt(agent, "Cron report-gate follow-up timed out")
+                    _gate_note = (
+                        f"fired (marker \"{_gate_marker}\" missing); {_nth} timed "
+                        f"out after {int(_REPORT_GATE_TIMEOUT_S)}s — {_kept_label} kept"
+                    )
+                    break
+                except Exception as _gate_exc:  # noqa: BLE001 — never take the run down
+                    logger.warning("Job '%s': report-gate follow-up failed: %s", job_name, _gate_exc)
+                    _gate_note = (
+                        f"fired (marker \"{_gate_marker}\" missing); {_nth} failed "
+                        f"({type(_gate_exc).__name__}) — {_kept_label} kept"
+                    )
+                    break
+                finally:
+                    _gate_pool.shutdown(wait=False, cancel_futures=True)
                 _second_text = ""
-            if _second_text:
+                if isinstance(_second, dict) and _second.get("failed") is not True:
+                    _second_text = str(_second.get("final_response") or "").strip()
+                    if _second_text == "(No response generated)":
+                        _second_text = ""
+                if _second_text and _is_cron_silence_response(_second_text):
+                    # 2026-09-21 retrieval-audit: turn 1 was a 1406-char report ("13 PASS, 0 FAIL",
+                    # one repair) missing only the literal header; the nudge got "[SILENT]" back,
+                    # and because silence sentinels bypass the marker check it replaced the report
+                    # in the output file and the morning briefing. The gate exists to recover a
+                    # report, never to lose one: a silence answer to the nudge keeps what we had,
+                    # flagged like an empty follow-up, and no further nudge is sent.
+                    _gate_note = (
+                        f"fired (marker \"{_gate_marker}\" missing); {_nth} answered "
+                        f"[SILENT] — {_kept_label} kept"
+                    )
+                    break
+                _next_history = (_second.get("messages") if isinstance(_second, dict) else None) or _history
+                if not _second_text:
+                    _gate_note = (
+                        f"fired (marker \"{_gate_marker}\" missing); {_nth} "
+                        f"returned nothing — {_kept_label} kept"
+                    )
+                    if _attempt < _REPORT_GATE_MAX_FOLLOW_UPS:
+                        _history = _next_history
+                        continue
+                    break
                 final_response = _second_text
-                if _report_gate_missing_marker(job, final_response):
+                if not _report_gate_missing_marker(job, final_response):
                     _gate_note = (
                         f"fired (marker \"{_gate_marker}\" missing after turn 1); "
-                        f"still missing after the follow-up — delivering it anyway"
+                        f"{_nth} produced the report"
                     )
-                else:
-                    _gate_note = (
-                        f"fired (marker \"{_gate_marker}\" missing after turn 1); "
-                        f"the follow-up produced the report"
+                    break
+                if _attempt < _REPORT_GATE_MAX_FOLLOW_UPS:
+                    logger.warning(
+                        "Job '%s': %s still lacks report marker %r (%d chars) — granting a second follow-up",
+                        job_name, _nth, _gate_marker, len(final_response),
                     )
-            elif not _gate_note:
+                    _history = _next_history
+                    _kept_label = "the first follow-up's response"
+                    continue
                 _gate_note = (
-                    f"fired (marker \"{_gate_marker}\" missing); the follow-up "
-                    f"returned nothing — first response kept"
+                    f"fired (marker \"{_gate_marker}\" missing after turn 1); "
+                    f"still missing after two follow-ups — delivering the last response anyway"
                 )
             logger.info("Job '%s': report gate %s", job_name, _gate_note)
         final_response = _enforce_morning_briefing_coverage(job, prompt, final_response)

@@ -469,6 +469,12 @@ NARRATION = {"final_response": "Let me check what's happening and fix all four f
              "messages": FIRST_MESSAGES}
 REPORT = {"final_response": "Experiment design — 2026-09-06\nBacklog: eligible 14 | "
                             "Designed: 1564, 1565 | Retired: 1080, 1151"}
+# 2026-10-04: a first follow-up that is itself a tool-less planning turn (topic-deep-dive's
+# reasoning-only stop); carries its own messages so the second nudge continues from it.
+SECOND_NARRATION = {"final_response": "I need to run the OpenAlex queries, then write the synthesis.",
+                    "messages": FIRST_MESSAGES + [
+                        {"role": "user", "content": "REPORT GATE: …"},
+                        {"role": "assistant", "content": "I need to run the OpenAlex queries, then write the synthesis."}]}
 
 
 class TestRunJobReportGate:
@@ -533,12 +539,14 @@ class TestRunJobReportGate:
         assert final_response == NARRATION["final_response"]
         assert agent.run_conversation.call_count == 1
 
-    def test_empty_follow_up_keeps_the_first_response(self, tmp_path):
+    def test_empty_follow_ups_keep_the_first_response(self, tmp_path):
+        # an empty follow-up earns one more nudge (2026-10-04); two empties keep turn 1
         (success, output, final_response, _), agent = _run(
-            tmp_path, self.JOB, [NARRATION, {"final_response": ""}])
+            tmp_path, self.JOB, [NARRATION, {"final_response": ""}, {"final_response": ""}])
         assert success is True
         assert final_response == NARRATION["final_response"]
-        assert "first response kept" in output
+        assert "the second follow-up returned nothing — first response kept" in output
+        assert agent.run_conversation.call_count == 3
 
     def test_failed_follow_up_keeps_the_first_response(self, tmp_path):
         (success, output, final_response, _), agent = _run(
@@ -560,14 +568,36 @@ class TestRunJobReportGate:
         assert "the follow-up produced the report" not in output
         assert agent.run_conversation.call_count == 2
 
-    def test_follow_up_still_without_header_is_delivered_and_flagged(self, tmp_path):
-        second = {"final_response": "Designed both. Done."}
+    def test_two_follow_ups_still_without_header_deliver_the_last_one_flagged(self, tmp_path):
+        third = {"final_response": "Designed both. Done."}
         (success, output, final_response, _), agent = _run(
-            tmp_path, self.JOB, [NARRATION, second])
+            tmp_path, self.JOB, [NARRATION, SECOND_NARRATION, third])
         assert success is True
         assert final_response == "Designed both. Done."
-        assert "still missing after the follow-up" in output
-        assert agent.run_conversation.call_count == 2
+        assert "still missing after two follow-ups" in output
+        assert agent.run_conversation.call_count == 3
+
+    def test_second_follow_up_recovers_the_report(self, tmp_path):
+        # 2026-10-04 topic-deep-dive: the first follow-up was itself a reasoning-only planning
+        # turn; one more nudge is cheap and the night's slot is otherwise lost.
+        (success, output, final_response, error), agent = _run(
+            tmp_path, self.JOB, [NARRATION, SECOND_NARRATION, REPORT])
+        assert success is True and error is None
+        assert final_response == REPORT["final_response"]
+        assert agent.run_conversation.call_count == 3
+        third = agent.run_conversation.call_args_list[2]
+        # the second nudge continues the first follow-up's conversation and is the last call
+        assert third.kwargs["conversation_history"] == SECOND_NARRATION["messages"]
+        assert "LAST CALL" in third.args[0] and "Experiment design" in third.args[0]
+        assert "the second follow-up produced the report" in output
+
+    def test_failed_second_follow_up_keeps_the_first_follow_up(self, tmp_path):
+        (success, output, final_response, _), agent = _run(
+            tmp_path, self.JOB, [NARRATION, SECOND_NARRATION, RuntimeError("provider down")])
+        assert success is True
+        assert final_response == SECOND_NARRATION["final_response"]
+        assert "the second follow-up failed (RuntimeError) — the first follow-up's response kept" in output
+        assert agent.run_conversation.call_count == 3
 
 
 class TestDeliveryStripsPreamble:
