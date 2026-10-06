@@ -1000,17 +1000,22 @@ class GatewayShutdownMixin:
         """Send one shutdown notice; True when delivered. Failures are debug-logged, never raised."""
         where = "home channel " if kind == "home channel" else ""
         fail_fmt = f"Failed to send shutdown notification to {where}%s:%s: %s"
-        if not await self._send_notice_logged(adapter, chat_id, msg, platform_str, fail_fmt, **send_kwargs):
+        result = await self._send_notice_logged(adapter, chat_id, msg, platform_str, fail_fmt, **send_kwargs)
+        if not result:
             return False
-        logger.info("Sent shutdown notification to %s %s:%s", kind, platform_str, chat_id)
+        # message_id makes the notice auditable beside the cron deliveries: scripts/telegram-send.py
+        # keeps a ledger of every script send and the watchdog checks the chat's ids are contiguous.
+        logger.info("Sent shutdown notification to %s %s:%s message_id=%s", kind, platform_str, chat_id,
+                    getattr(result, "message_id", None))
         return True
 
     @staticmethod
     async def _send_notice_logged(
         adapter, chat_id: str, msg: str, platform_str: str, fail_fmt: str, raise_fmt: Optional[str] = None, **kw
-    ) -> bool:
+    ):
         """``adapter.send`` whose failure is debug-logged as ``fmt % (platform, chat, error)`` — ``fail_fmt``
-        for success=False, ``raise_fmt`` (default ``fail_fmt``) for a raise; True only on a delivered send.
+        for success=False, ``raise_fmt`` (default ``fail_fmt``) for a raise; the truthy SendResult (or True
+        when the adapter returned none) only on a delivered send, False otherwise.
         Every shutdown notice races live turns, so it always carries the interim marker (#98432)."""
         from gateway.run import _interim_metadata
         kw["metadata"] = _interim_metadata(kw.get("metadata"))
@@ -1022,7 +1027,7 @@ class GatewayShutdownMixin:
         if _send_failed(result):
             logger.debug(fail_fmt, platform_str, chat_id, _send_error(result))
             return False
-        return True
+        return result if result is not None else True
 
     async def _notify_active_sessions_of_shutdown(self) -> None:
         """Send shutdown/restart notifications to active chats and home channels.
