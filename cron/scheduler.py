@@ -809,6 +809,12 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
                     gaps.append(f"{name}: delivery={delivery}; job status={status}, but {unflagged}")
                 if status == "completed" and not report_paths:
                     gaps.append(f"{name}: completed execution has no saved report file")
+                mismatch = row.get("ledger_mismatch")
+                if mismatch and not any(
+                    re.search(r"\b(ledger|prose|mismatch|unreported|claims?)\b", line, re.I)
+                    for line in matching_lines
+                ):
+                    gaps.append(f"{name}: ledger/prose mismatch — {str(mismatch)[:200]}; {unflagged}")
 
         for orphan in manifest.get("unmatched_report_files", []):
             if not isinstance(orphan, dict):
@@ -2823,7 +2829,80 @@ def _memory_md_snapshot() -> Optional[dict]:
         return None
 
 
-def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None) -> str:
+# Write verbs only. Descriptive verbs (retired, superseded, answered, closed, marked) name facts a
+# report merely describes — the 10-04/10-05 replay flagged dream's "Retired entries: fids …" list and
+# retrieval-audit's "fid 2401 superseded" as phantom writes — so they are not claims here.
+_PROSE_CLAIM_VERBS = (
+    r"stored|wrote|written|created|added|queued|re-?queued|promoted|demoted|removed|deleted|"
+    r"merged|updated|boosted|bumped|enriched"
+)
+_PROSE_FID_TOKEN = r"(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*"
+# an id list: "3323/3324", "871, 872, 893", "fid 893 and fid 892" — every number inside it is a claim
+# (?!-\d): a number that continues as a date ("2026-10-05") is never an id
+_PROSE_ID_LIST = r"\d{1,6}(?!-\d)(?:\s*(?:[,/]|and|&)\s*(?:(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*)?\d{1,6}(?!-\d))*"
+# a bare list (no fid token) must look like fids: 3+ digits, so "open-question 6 → 5" is a count, not a claim
+_PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
+# "stored fid=3325", "Demoted predecessor fid=3273", "removed fid 893 and fid 892": verb, a short digit-free
+# gap, a fid token — "FACTS PROMOTED (2): fids 901, 902" included. (A 60-char gap matched "created facts …
+# I noticed fid 626" on a real report; 25 chars does not.)
+_PROSE_CLAIM_BEFORE = re.compile(
+    rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\b[^.\n]{{0,25}}?{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})", re.I)
+# "Retired: 3275, 3276", "Designed: 3328": verb, colon, bare ids
+_PROSE_CLAIM_COLON = re.compile(
+    rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\s*:\s*(?P<ids>{_PROSE_BARE_LIST})(?![\d.])", re.I)
+# "3274/3275/3276 → researched", "fid 3273 -> demoted": ids right before an arrow
+_PROSE_CLAIM_AFTER = re.compile(
+    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-])(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)", re.I)
+# Jobs whose report is ABOUT other jobs' writes: their claim verbs name facts they never touched.
+_PROSE_CHECK_REPORTERS = frozenset({"morning-briefing"})
+
+
+def _prose_check(response: str, created, created_gone, updated, removed, feedback,
+                 job_name: Optional[str] = None) -> tuple[list, list]:
+    """Compare what the report SAYS was written with what the store RECORDED (2026-10-06, cron review
+    #141). Returns (problems, notes). A problem is either a consequential write the prose hides (a
+    create or a remove whose id appears nowhere in the response — the 2026-08-15 shape, where a
+    deleted fact went unmentioned) or a write the prose claims that the store never saw (a verb such
+    as stored/demoted/removed beside a fid the ledger does not carry — the 08-15 "4 removals" shape).
+    Updates and feedback the prose does not name are notes, not problems: many jobs summarise them
+    by count. Pure: the caller catches nothing here because nothing here can raise on text input."""
+    text = response or ""
+
+    def named(fid) -> bool:
+        # the id as a whole number: not inside a longer number and not a decimal part ("0.70", "1.5")
+        return re.search(rf"(?<!\d)(?<!\d\.){int(fid)}(?!\d)(?!\.\d)(?!%)", text) is not None
+
+    ledger_ids = set()
+    for rows in (created, created_gone, updated, removed, feedback):
+        for r in rows or ():
+            ledger_ids.add(int(r["fact_id"]))
+    problems, notes = [], []
+    hidden_created = [int(r["fact_id"]) for r in list(created or ()) + list(created_gone or ()) if not named(r["fact_id"])]
+    hidden_removed = [int(r["fact_id"]) for r in removed or () if not named(r["fact_id"])]
+    if hidden_created:
+        problems.append("created " + ", ".join(map(str, hidden_created)) + " not named in the response")
+    if hidden_removed:
+        problems.append("removed " + ", ".join(map(str, hidden_removed)) + " not named in the response")
+    quiet_updates = [int(r["fact_id"]) for r in list(updated or ()) + list(feedback or ()) if not named(r["fact_id"])]
+    if quiet_updates:
+        notes.append(f"{len(quiet_updates)} update(s) not named: " + ", ".join(map(str, quiet_updates[:8]))
+                     + (" …" if len(quiet_updates) > 8 else ""))
+    if job_name not in _PROSE_CHECK_REPORTERS:
+        claimed = {}
+        for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
+            for m in rx.finditer(text):
+                ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
+                for tok in re.findall(r"\d{1,6}", ids):
+                    claimed.setdefault(int(tok), m.group("verb").lower())
+        phantom = sorted((fid, verb) for fid, verb in claimed.items() if fid not in ledger_ids)
+        if phantom:
+            problems.append("claims " + ", ".join(f"{verb!s} {fid}" for fid, verb in phantom[:8])
+                            + (" …" if len(phantom) > 8 else "") + " but the store recorded no such write")
+    return problems, notes
+
+
+def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None,
+                       response: Optional[str] = None, job_name: Optional[str] = None) -> str:
     """Render this job's ACTUAL fact-store writes, read back from the database.
 
     A cron job's report is prose the model wrote, and on the write accounting it is repeatedly
@@ -2838,6 +2917,10 @@ def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None)
     block also states whether MEMORY.md changed during the run, computed independently of the
     database read-back so a broken store cannot silence it. Returns "" only when nothing can be
     stated at all — a ledger that cannot be built must never take a job's report down with it.
+
+    ``response`` (the job's final response, success path only) adds a ``Prose check`` line from
+    :func:`_prose_check`: writes the prose hides and writes it claims that never happened. The
+    morning-briefing manifest lifts that line into ``ledger_mismatch`` per execution.
     """
     db_rows = None
     if session_id:
@@ -2901,6 +2984,19 @@ def _fact_write_ledger(session_id: str, memory_md_before: Optional[dict] = None)
                 for r in removed:
                     lines.append(f"    - {r['fact_id']} ({r['category']}) — {r['head']!r}")
                 lines.append("    Prior versions are in `fact_history`; recovery is a SELECT.")
+        if response is not None:
+            try:
+                problems, notes = _prose_check(response, created, created_gone, updated, removed, feedback,
+                                               job_name=job_name)
+            except Exception:  # pragma: no cover - defensive: the check must never cost the ledger
+                logger.debug("prose check failed", exc_info=True)
+                problems, notes = [], []
+            if problems:
+                lines.append("- **Prose check:** PROBLEM — " + "; ".join(problems)
+                             + ("" if not notes else " (" + "; ".join(notes) + ")"))
+            else:
+                lines.append("- **Prose check:** ok — the response names every created/removed id and "
+                             "claims no write the store lacks" + ("" if not notes else " (" + "; ".join(notes) + ")"))
     if mem_line:
         lines.append(mem_line)
     lines.append("")
@@ -3123,7 +3219,8 @@ def run_job(
         logged_response = final_response if final_response else "(No response generated)"
         output = (
             _run_doc_header(job, job_name, job_id, prompt, gate_line=_gate_line,
-                            ledger=_fact_write_ledger(_cron_session_id, _memfile_before))
+                            ledger=_fact_write_ledger(_cron_session_id, _memfile_before,
+                                                      response=final_response, job_name=job_name))
             + f"## Response\n\n{logged_response}\n"
         )
         logger.info("Job '%s' completed successfully", job_name)

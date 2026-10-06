@@ -74,6 +74,33 @@ class TestMorningBriefingCoverageGate:
             {"name": "morning-briefing"}, _manifest_prompt(manifest), response
         ) == response
 
+    def test_ledger_prose_mismatch_is_appended_when_the_briefing_is_silent_about_it(self):
+        """2026-10-06 (#141): the manifest's ledger_mismatch field is load-bearing without the model."""
+        manifest = {
+            "version": 1,
+            "date": "2026-10-06",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "c0c0c0c0c0c0", "name": "consolidate-synthesize", "status": "completed",
+                 "delivery": "suppressed", "issue": None,
+                 "ledger_mismatch": "PROBLEM — removed 879 not named in the response",
+                 "report_files": ["cron/output/c0c0c0c0c0c0/2026-10-06_03-25-19.md"]},
+            ],
+            "report_files": [
+                {"job_id": "c0c0c0c0c0c0", "name": "consolidate-synthesize",
+                 "path": "cron/output/c0c0c0c0c0c0/2026-10-06_03-25-19.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        silent = "Morning Briefing — 2026-10-06\n\n**What Happened Overnight**\n- consolidate-synthesize: 4 removals verified.\n"
+        result = _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), silent)
+        assert "consolidate-synthesize: ledger/prose mismatch — PROBLEM — removed 879 not named" in result
+
+        carried = "Morning Briefing — 2026-10-06\n\n**Needs Attention**\n- consolidate-synthesize: ledger shows a removal (879) its prose hides.\n"
+        assert _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), carried) == carried
+
     def test_coverage_checks_the_last_report_draft_that_will_be_delivered(self):
         manifest = {
             "version": 1,
