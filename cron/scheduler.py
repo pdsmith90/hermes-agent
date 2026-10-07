@@ -2868,6 +2868,11 @@ _PROSE_CLAIM_COLON = re.compile(
 # "3274/3275/3276 → researched", "fid 3273 -> demoted": ids right before an arrow
 _PROSE_CLAIM_AFTER = re.compile(
     rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-])(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)", re.I)
+# "3371→3375→3377": three or more ids joined by arrows trace a lineage, not a write — the 10-07
+# consolidate report named such a chain while judging it "not duplicates". Blanked before the arrow
+# rule runs; two ids ("promoted 3381 → memory-entry 3391") stay a claim.
+_PROSE_ID_CHAIN = re.compile(
+    rf"(?<![\w./-])(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}){{2,}}(?![\d.])", re.I)
 # Jobs whose report is ABOUT other jobs' writes: their claim verbs name facts they never touched.
 _PROSE_CHECK_REPORTERS = frozenset({"morning-briefing"})
 
@@ -2904,8 +2909,9 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
                      + (" …" if len(quiet_updates) > 8 else ""))
     if job_name not in _PROSE_CHECK_REPORTERS:
         claimed = {}
+        unchained = _PROSE_ID_CHAIN.sub(" ", text)
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
-            for m in rx.finditer(text):
+            for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else text):
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
                 for tok in re.findall(r"\d{1,6}", ids):
                     claimed.setdefault(int(tok), m.group("verb").lower())

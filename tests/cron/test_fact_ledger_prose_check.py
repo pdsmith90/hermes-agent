@@ -48,6 +48,19 @@ class TestProseCheckPure:
         assert len(problems) == 1
         assert "3276" in problems[0]
 
+    @pytest.mark.parametrize("chain", ["3371→3375→3377", "fid 3371 -> fid 3375 -> fid 3377"])
+    def test_an_id_chain_is_a_lineage_not_a_claim(self, chain):
+        # 2026-10-07 consolidate: "Recent project facts (3371→3375→3377 …) are properly chained
+        # sequential phases, not duplicates" was read as two arrow claims.
+        resp = f"Synthesized fid=3389. Recent project facts ({chain}) are chained phases, not duplicates."
+        problems, _ = _prose_check(resp, _rows(3389), [], _rows(3389), [], [])
+        assert problems == []
+
+    def test_a_two_id_arrow_is_still_a_claim(self):
+        resp = "dream: promoted 3381 → memory-entry 3391"
+        problems, _ = _prose_check(resp, _rows(3391), [], [], [], [])
+        assert len(problems) == 1 and "3381" in problems[0]
+
     def test_slash_and_comma_lists_are_split(self):
         resp = "doc-paper-ingest: stored fids 3323/3324, updated fid 3272"
         problems, notes = _prose_check(resp, _rows(3323, 3324), [], _rows(3272), [], [])
