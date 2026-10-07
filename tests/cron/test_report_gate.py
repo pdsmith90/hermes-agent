@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from cron.scheduler import (
+    _ends_in_promoted_reasoning,
     _normalize_report_text,
     _enforce_morning_briefing_coverage,
     _morning_briefing_manifest,
@@ -415,6 +416,23 @@ class TestMarkerHelper:
         assert _normalize_report_text("  Doc &  Paper\nIngest — x") == "doc & paper ingest - x"
 
 
+class TestPromotedReasoningRow:
+    def test_a_reasoning_only_row_is_detected(self):
+        assert _ends_in_promoted_reasoning(REASONING_ONLY["messages"]) is True
+
+    def test_a_real_reply_is_not(self):
+        assert _ends_in_promoted_reasoning(FIRST_MESSAGES) is False
+
+    def test_only_the_last_assistant_row_counts(self):
+        later = REASONING_ONLY["messages"] + [{"role": "user", "content": "REPORT GATE: …"},
+                                              {"role": "assistant", "content": "Daily report"}]
+        assert _ends_in_promoted_reasoning(later) is False
+
+    def test_no_assistant_row(self):
+        assert _ends_in_promoted_reasoning(None) is False
+        assert _ends_in_promoted_reasoning([{"role": "user", "content": "x"}]) is False
+
+
 class TestPreambleStrip:
     """Delivery drops narration above the report header; the file keeps it."""
 
@@ -502,6 +520,12 @@ SECOND_NARRATION = {"final_response": "I need to run the OpenAlex queries, then 
                     "messages": FIRST_MESSAGES + [
                         {"role": "user", "content": "REPORT GATE: …"},
                         {"role": "assistant", "content": "I need to run the OpenAlex queries, then write the synthesis."}]}
+# 2026-10-07: a reasoning-only clean stop. The row keeps ``content`` empty and carries the promoted
+# reasoning in the ``api_content`` replay sidecar (agent/turn_final_response.py).
+REASONING_TEXT = "Let me analyze the digest. Every pattern is covered, so the correct output is [SILENT]."
+REASONING_ONLY = {"final_response": REASONING_TEXT,
+                  "messages": [{"role": "user", "content": "mine the traces"},
+                               {"role": "assistant", "content": "", "api_content": REASONING_TEXT}]}
 
 
 class TestRunJobReportGate:
@@ -594,6 +618,28 @@ class TestRunJobReportGate:
         assert "the follow-up answered [SILENT] — first response kept" in output
         assert "the follow-up produced the report" not in output
         assert agent.run_conversation.call_count == 2
+
+    def test_silent_follow_up_after_a_reasoning_only_turn_is_honored(self, tmp_path):
+        # 2026-10-07 daily-trace-mining: turn 1 was a reasoning-only clean stop ending "the correct
+        # output is [SILENT]"; keeping it delivered the model's working to the phone.
+        (success, output, final_response, _), agent = _run(
+            tmp_path, self.JOB, [REASONING_ONLY, {"final_response": "[SILENT]"}])
+        assert success is True
+        assert final_response == "[SILENT]"
+        assert "the follow-up answered [SILENT] — first response was reasoning only, [SILENT] honored" in output
+        assert agent.run_conversation.call_count == 2
+
+    def test_silent_second_follow_up_after_a_reasoning_only_follow_up_is_honored(self, tmp_path):
+        reasoning_follow_up = {"final_response": REASONING_TEXT,
+                               "messages": FIRST_MESSAGES + [
+                                   {"role": "user", "content": "REPORT GATE: …"},
+                                   {"role": "assistant", "content": None, "api_content": REASONING_TEXT}]}
+        (success, output, final_response, _), agent = _run(
+            tmp_path, self.JOB, [NARRATION, reasoning_follow_up, {"final_response": "[SILENT]"}])
+        assert success is True
+        assert final_response == "[SILENT]"
+        assert "the first follow-up's response was reasoning only, [SILENT] honored" in output
+        assert agent.run_conversation.call_count == 3
 
     def test_two_follow_ups_still_without_header_deliver_the_last_one_flagged(self, tmp_path):
         third = {"final_response": "Designed both. Done."}

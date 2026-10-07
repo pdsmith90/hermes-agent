@@ -676,6 +676,21 @@ def _report_gate_missing_marker(job: dict, final_response: str) -> Optional[str]
     return marker
 
 
+def _ends_in_promoted_reasoning(messages) -> bool:
+    """True when the last assistant row of ``messages`` is a reasoning-only clean stop.
+
+    agent/turn_final_response.py promotes the reasoning of such a turn to the final response but
+    keeps the row's ``content`` empty and carries the text in the ``api_content`` replay sidecar —
+    the only case where a final assistant row has a sidecar — so the row tells working from reply.
+    """
+    for msg in reversed(messages or []):
+        if isinstance(msg, dict) and msg.get("role") == "assistant":
+            content = msg.get("content")
+            return (content is None or (isinstance(content, str) and not content.strip())) and bool(
+                str(msg.get("api_content") or "").strip())
+    return False
+
+
 def _strip_report_preamble(job: dict, text: str) -> str:
     """Return ``text`` from its report header down, for delivery.
 
@@ -3132,6 +3147,7 @@ def run_job(
             )
             _history = result.get("messages") or None
             _kept_label = "first response"   # what is delivered when a follow-up yields nothing usable
+            _kept_messages = _history        # the conversation whose last turn produced it
             for _attempt in range(1, _REPORT_GATE_MAX_FOLLOW_UPS + 1):
                 _nth = "the follow-up" if _attempt == 1 else "the second follow-up"
                 _second = None
@@ -3167,6 +3183,17 @@ def run_job(
                     if _second_text == "(No response generated)":
                         _second_text = ""
                 if _second_text and _is_cron_silence_response(_second_text):
+                    if _ends_in_promoted_reasoning(_kept_messages):
+                        # 2026-10-07 daily-trace-mining: turn 1 was a reasoning-only clean stop (898
+                        # chars ending "the correct output is [SILENT]"); keeping it put the model's
+                        # working on the phone verbatim. Promoted reasoning is never a report, so the
+                        # silence answer stands.
+                        final_response = _second_text
+                        _gate_note = (
+                            f"fired (marker \"{_gate_marker}\" missing); {_nth} answered "
+                            f"[SILENT] — {_kept_label} was reasoning only, [SILENT] honored"
+                        )
+                        break
                     # 2026-09-21 retrieval-audit: turn 1 was a 1406-char report ("13 PASS, 0 FAIL",
                     # one repair) missing only the literal header; the nudge got "[SILENT]" back,
                     # and because silence sentinels bypass the marker check it replaced the report
@@ -3200,7 +3227,7 @@ def run_job(
                         "Job '%s': %s still lacks report marker %r (%d chars) — granting a second follow-up",
                         job_name, _nth, _gate_marker, len(final_response),
                     )
-                    _history = _next_history
+                    _history = _kept_messages = _next_history
                     _kept_label = "the first follow-up's response"
                     continue
                 _gate_note = (
