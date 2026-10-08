@@ -266,6 +266,26 @@ def _validate_action_args(action, args):
     return " ".join(parts)
 
 
+_FACT_WRITE_ACTIONS = frozenset({"add", "update", "remove"})
+
+
+def _cron_read_only_refusal(what: str):
+    """Return an error string while a cron job declared ``fact_store_read_only`` runs, else None.
+
+    A READ-ONLY line in a job's prompt is advice the model can ignore: on 2026-10-08 the
+    morning-briefing job added a fact despite one. The scheduler binds the flag per run.
+    """
+    from gateway.session_context import CRON_FACT_STORE_READ_ONLY
+
+    if not CRON_FACT_STORE_READ_ONLY.get():
+        return None
+    return (
+        f"{what} refused: this cron job is read-only on the fact store "
+        "(fact_store_read_only in its jobs.json record). Nothing was written; "
+        "state the finding in your report instead."
+    )
+
+
 def _content_wipe_refusal(existing: dict, args: dict):
     """Return an error string when an update's ``content`` would destroy a body.
 
@@ -705,6 +725,11 @@ class HolographicMemoryProvider(MemoryProvider):
             store = self._store
             retriever = self._retriever
 
+            if action in _FACT_WRITE_ACTIONS:
+                refusal = _cron_read_only_refusal(f"fact_store action={action}")
+                if refusal:
+                    return tool_error(refusal)
+
             arg_error = _validate_action_args(action, args)
             if arg_error:
                 return tool_error(arg_error)
@@ -870,6 +895,9 @@ class HolographicMemoryProvider(MemoryProvider):
 
     def _handle_fact_feedback(self, args: dict) -> str:
         try:
+            refusal = _cron_read_only_refusal("fact_feedback")
+            if refusal:
+                return tool_error(refusal)
             fact_id = int(args["fact_id"])
             helpful = args["action"] == "helpful"
             result = self._store.record_feedback(

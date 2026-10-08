@@ -61,6 +61,11 @@ _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", de
 _CRON_AUTO_DELIVER_CHAT_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_CHAT_ID", default=_UNSET)
 _CRON_AUTO_DELIVER_THREAD_ID = ContextVar("HERMES_CRON_AUTO_DELIVER_THREAD_ID", default=_UNSET)
 
+# True while a cron job whose jobs.json record says ``fact_store_read_only`` runs (bound by
+# cron.scheduler._CronRunScope); the holographic memory provider refuses fact writes under it.
+# Outside _VAR_MAP on purpose: an in-process scope marker, never bridged into subprocess env.
+CRON_FACT_STORE_READ_ONLY = ContextVar("HERMES_CRON_FACT_STORE_READ_ONLY", default=False)
+
 # Legacy env-var name -> ContextVar for get_session_env (_SESSION_ASYNC_DELIVERY deliberately
 # absent: it is a bool capability, read via async_delivery_supported).
 _VAR_MAP = {var.name: var for var in (

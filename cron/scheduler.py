@@ -2620,7 +2620,7 @@ class _CronRunScope:
     """
 
     def __init__(self, job: dict, job_id: str, execution_id: Optional[str]):
-        from gateway.session_context import set_session_vars, _VAR_MAP
+        from gateway.session_context import set_session_vars, _VAR_MAP, CRON_FACT_STORE_READ_ONLY
         from tools.terminal_tool import record_session_cwd
 
         self._var_map = _VAR_MAP
@@ -2654,6 +2654,11 @@ class _CronRunScope:
         self._cron_session_var = _VAR_MAP["HERMES_CRON_SESSION"]
         self._cron_session_token = None
         self._non_dispatcher_token = None
+        # jobs.json ``fact_store_read_only``: a READ-ONLY line in the prompt alone did not hold (2026-10-08,
+        # morning-briefing added a fact), so the memory provider refuses fact writes while this is bound.
+        self._fact_ro_var = CRON_FACT_STORE_READ_ONLY
+        self._fact_ro = bool(job.get("fact_store_read_only"))
+        self._fact_ro_token = None
 
     def enter(self) -> None:
         # Scope cron approval policy; exit() RESETS via token (pinning "" would suppress the legacy
@@ -2664,6 +2669,8 @@ class _CronRunScope:
         # ContextVar, NOT an os.environ clear (env is shared with the worker heartbeat and
         # concurrent jobs); copy_context() carries it into the agent thread.
         self._non_dispatcher_token = enter_non_dispatcher_owned_context()
+        if self._fact_ro:
+            self._fact_ro_token = self._fact_ro_var.set(True)
 
     def exit(self) -> None:
         from gateway.session_context import clear_session_vars
@@ -2675,6 +2682,8 @@ class _CronRunScope:
             self._cron_session_var.reset(self._cron_session_token)
         if self._non_dispatcher_token is not None:
             exit_non_dispatcher_owned_context(self._non_dispatcher_token)
+        if self._fact_ro_token is not None:
+            self._fact_ro_var.reset(self._fact_ro_token)
         for name in _CRON_DELIVERY_VARS:
             self._var_map[name].set("")
 
