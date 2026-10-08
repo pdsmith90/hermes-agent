@@ -61,6 +61,19 @@ class TestProseCheckPure:
         problems, _ = _prose_check(resp, _rows(3391), [], [], [], [])
         assert len(problems) == 1 and "3381" in problems[0]
 
+    @pytest.mark.parametrize("ref", ["already stored as fid 1335", "previously stored as fid 1335",
+                                     "an already-stored fid 1335"])
+    def test_an_already_stored_fid_is_a_reference_not_a_claim(self, ref):
+        # 2026-10-08 doc-paper-ingest: "extends an earlier paper (already stored as fid 1335)" named an
+        # August fact the run never touched, and was read as the claim "stored 1335".
+        resp = f"Stored fids 3430/3431/3432. The new filter extends an earlier paper ({ref})."
+        problems, _ = _prose_check(resp, _rows(3430, 3431, 3432), [], [], [], [])
+        assert problems == []
+
+    def test_a_bare_stored_as_fid_is_still_a_claim(self):
+        problems, _ = _prose_check("The earlier paper is stored as fid 1335.", [], [], [], [], [])
+        assert len(problems) == 1 and "stored 1335" in problems[0]
+
     def test_slash_and_comma_lists_are_split(self):
         resp = "doc-paper-ingest: stored fids 3323/3324, updated fid 3272"
         problems, notes = _prose_check(resp, _rows(3323, 3324), [], _rows(3272), [], [])
