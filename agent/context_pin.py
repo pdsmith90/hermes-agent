@@ -36,7 +36,7 @@ def advertised_context_length(model: str, base_url: str = "") -> Optional[int]:
     latency or a failing request."""
     from agent.model_metadata import (
         DEFAULT_CONTEXT_LENGTHS, _load_model_metadata_disk_cache, _longest_key_match,
-        _strip_provider_prefix, get_cached_context_length,
+        _strip_provider_prefix, get_cached_context_length, is_local_endpoint,
     )
     model = _strip_provider_prefix(str(model or ""))
     if not model:
@@ -49,6 +49,11 @@ def advertised_context_length(model: str, base_url: str = "") -> Optional[int]:
     ctx = entry.get("context_length") if isinstance(entry, dict) else None
     if isinstance(ctx, int) and ctx > 0:
         return ctx
+    if is_local_endpoint(base_url):
+        # A vendor catalog cannot describe a user-named alias on a local server: "qwen36-27b-cron"
+        # on llama-swap matched the generic "qwen" entry (131,072) and warned every cron process
+        # against a pin equal to the server's own -c (2026-10-09). Only a learned window counts there.
+        return None
     hit = _longest_key_match(DEFAULT_CONTEXT_LENGTHS, model.lower())
     return hit[1] if hit else None
 
