@@ -2884,6 +2884,13 @@ _PROSE_CLAIM_AFTER = re.compile(
 # rule runs; two ids ("promoted 3381 → memory-entry 3391") stay a claim.
 _PROSE_ID_CHAIN = re.compile(
     rf"(?<![\w./-])(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}){{2,}}(?![\d.])", re.I)
+# "Chao 2015 → Guo et al. 2019", "Vernotte 2015 → GRACE-FO": an author-year citation before an arrow
+# traces a lineage, not a write (2026-10-04 dream, 2026-10-09 doc-paper-ingest). Blanked before the
+# arrow rule runs, like a chain. A claim verb or a fid token in the author's place ("Promoted 1983 →",
+# "Fid 2015 →") is not a citation and stays a claim.
+_PROSE_AUTHOR_YEAR = re.compile(
+    rf"\b(?!(?i:{_PROSE_CLAIM_VERBS}|fids?|fact_ids?|facts?)\b)[A-Z][\w'’-]+"
+    r"(?:\s+(?:et\s+al\.?|(?:&|and)\s+[A-Z][\w'’-]+))?,?\s+\(?(?:19|20)\d\d[a-z]?\)?(?=\s*(?:→|->))")
 # Jobs whose report is ABOUT other jobs' writes: their claim verbs name facts they never touched.
 _PROSE_CHECK_REPORTERS = frozenset({"morning-briefing"})
 
@@ -2920,7 +2927,7 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
                      + (" …" if len(quiet_updates) > 8 else ""))
     if job_name not in _PROSE_CHECK_REPORTERS:
         claimed = {}
-        unchained = _PROSE_ID_CHAIN.sub(" ", text)
+        unchained = _PROSE_AUTHOR_YEAR.sub(" ", _PROSE_ID_CHAIN.sub(" ", text))
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
             for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else text):
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""

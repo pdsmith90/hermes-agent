@@ -70,6 +70,20 @@ class TestProseCheckPure:
         problems, _ = _prose_check(resp, _rows(3430, 3431, 3432), [], [], [], [])
         assert problems == []
 
+    @pytest.mark.parametrize("cite", ["Chao 2015 → Guo et al. 2019", "Vernotte 2015 → GRACE-FO",
+                                      "Chao et al. 2015 -> Guo 2019", "Swenson & Wahr 2006 → DDK"])
+    def test_an_author_year_before_an_arrow_is_a_citation_not_a_claim(self, cite):
+        # 2026-10-09 doc-paper-ingest: "The Chao 2015 → Guo et al. 2019 lineage" was read as the
+        # claim "→ 2015" (the 10-04 dream report had "Vernotte 2015 → GRACE-FO" the same way).
+        resp = f"Stored fids 3467/3468/3469. The {cite} lineage maps onto the methods paper."
+        problems, _ = _prose_check(resp, _rows(3467, 3468, 3469), [], [], [], [])
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", ["Promoted 1983 → memory-entry", "fid 2015 → demoted", "Fid 2015 -> retired"])
+    def test_a_year_shaped_fid_before_an_arrow_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(f"dream: {claim}.", [], [], [], [], [])
+        assert len(problems) == 1 and ("1983" in problems[0] or "2015" in problems[0])
+
     def test_a_bare_stored_as_fid_is_still_a_claim(self):
         problems, _ = _prose_check("The earlier paper is stored as fid 1335.", [], [], [], [], [])
         assert len(problems) == 1 and "stored 1335" in problems[0]
