@@ -138,6 +138,14 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
 
 
 def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
+    # FORK: cron reads MEMORY.md but never writes it — the file is a rendered view of promoted facts that
+    # only scripts/render-memory-md.py writes, and cron's skip_memory=True no longer withholds the store
+    # (the #65429 toolset override builds it). On 2026-10-10 a read-only cron job's memory(action="add")
+    # appended to MEMORY.md and the provider mirror stored a fact.
+    if getattr(agent, "platform", None) == "cron":
+        return json.dumps({"success": False, "error": (
+            "memory() is not available to cron jobs: MEMORY.md is a rendered view of promoted facts. "
+            "Nothing was written; use fact_store if this job may write facts, else state it in your report.")})
     result = _call_tool(
         "tools.memory_tool", "memory_tool", args,
         (
