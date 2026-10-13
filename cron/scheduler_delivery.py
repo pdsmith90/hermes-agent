@@ -1552,6 +1552,11 @@ def _live_send_text(
             f"configured thread_id {requested_thread_id} for "
             f"{t.where} was not found; delivered without thread_id",
             delivery_errors)
+    # A long report goes out as several messages and only the first id rides on the "delivered to" line;
+    # the watchdog's message-id ledger read the rest as a foreign sender (cron review #164: #606 + #607).
+    split_ids = send_raw_response.get("message_ids") if isinstance(send_raw_response, dict) else None
+    if split_ids and len(split_ids) > 1:
+        logger.info("Job '%s': split delivery message_ids=%s", job["id"], ",".join(str(i) for i in split_ids))
     return True, False, delivered_message_id
 
 

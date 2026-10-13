@@ -203,6 +203,24 @@ class TestFilteredResultIsNotDelivered:
         assert "via live adapter" in caplog.text
 
 
+class TestSplitDeliveryLogsEveryId:
+    """Cron review #164: the 2026-10-12 4,994-char briefing went out as Telegram #606 + #607; only #606
+    was logged, so the watchdog's message-id ledger read #607 as a foreign sender of the bot token."""
+
+    def test_every_chunk_id_is_logged(self, caplog):
+        result = _SendResult(message_id="606", raw_response={"message_ids": ["606", "607"]})
+        with caplog.at_level(logging.INFO, logger="cron.scheduler"):
+            error, _, _ = _run(_job(), "Nightly report.", result)
+        assert error is None
+        assert "split delivery message_ids=606,607" in caplog.text
+
+    def test_a_single_message_logs_no_split_line(self, caplog):
+        result = _SendResult(message_id="606", raw_response={"message_ids": ["606"]})
+        with caplog.at_level(logging.INFO, logger="cron.scheduler"):
+            _run(_job(), "Nightly report.", result)
+        assert "split delivery" not in caplog.text
+
+
 class TestEmptyPayloadFailsClosed:
 
     def test_empty_payload_never_reaches_the_standalone_sender(self, caplog):
