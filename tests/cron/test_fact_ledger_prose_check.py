@@ -84,6 +84,24 @@ class TestProseCheckPure:
         problems, _ = _prose_check(f"dream: {claim}.", [], [], [], [], [])
         assert len(problems) == 1 and ("1983" in problems[0] or "2015" in problems[0])
 
+    @pytest.mark.parametrize("lineage", [
+        "sparked by a survey paper fid 3507 → Atlas; fid 3508 → fact_store retrieval",
+        "the audit pair (fid 3523 → fid 3524)",
+    ])
+    def test_an_arrow_into_a_topic_or_another_fid_is_a_lineage_not_a_claim(self, lineage):
+        # 2026-10-10 dream and 2026-10-11 consolidate (cron review #166): the arrow traced where an idea
+        # came from or which fact superseded which; only an arrow into a status, category or trust
+        # value states a write.
+        resp = f"Stored fid 3510. The idea was {lineage}."
+        problems, _ = _prose_check(resp, _rows(3510), [], [], [], [])
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", ["fid 3326 → 0.55", "3274 → CONFIRMED", "fid 3301 -> parked",
+                                       "AGED fid=3511 -> attempted-once", "Duplicate merge: fid 3517 → fid 3495"])
+    def test_an_arrow_into_a_status_or_trust_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(f"research: {claim}.", [], [], [], [], [])
+        assert len(problems) == 1
+
     def test_a_bare_stored_as_fid_is_still_a_claim(self):
         problems, _ = _prose_check("The earlier paper is stored as fid 1335.", [], [], [], [], [])
         assert len(problems) == 1 and "stored 1335" in problems[0]

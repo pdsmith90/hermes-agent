@@ -2876,14 +2876,30 @@ _PROSE_CLAIM_BEFORE = re.compile(
 # "Retired: 3275, 3276", "Designed: 3328": verb, colon, bare ids
 _PROSE_CLAIM_COLON = re.compile(
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\s*:\s*(?P<ids>{_PROSE_BARE_LIST})(?![\d.])", re.I)
-# "3274/3275/3276 → researched", "fid 3273 -> demoted": ids right before an arrow
+# What an arrow claim points AT: an id or a number (a merge, a promotion, a trust value) or a verdict,
+# status or category word. "fid 3507 → <a project name>" (2026-10-10 dream) traced where an idea came from
+# (cron review #166).
+_PROSE_ARROW_TARGET = (
+    rf"(?:trust\s*)?(?:{_PROSE_FID_TOKEN})?\.?\d|(?:{_PROSE_CLAIM_VERBS}|researched|confirmed|refuted|"
+    r"partially[- ]confirmed|inconclusive|superseded|retired|parked|resolved|designed?|archived|invalidated|"
+    r"attempted(?:-once)?|blocked-local|tagged|helpful|unhelpful|substituted|memory-entry|synthesis|lesson|"
+    r"project|paper|activity|open-question|hypothesis|tool|general|outage|user_pref)\b"
+)
+# "3274/3275/3276 → researched", "fid 3273 -> demoted": ids right before an arrow into a write's result
 _PROSE_CLAIM_AFTER = re.compile(
-    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-])(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)", re.I)
+    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-])(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)"
+    rf"(?=\s*(?:{_PROSE_ARROW_TARGET}))", re.I)
 # "3371→3375→3377": three or more ids joined by arrows trace a lineage, not a write — the 10-07
 # consolidate report named such a chain while judging it "not duplicates". Blanked before the arrow
 # rule runs; two ids ("promoted 3381 → memory-entry 3391") stay a claim.
 _PROSE_ID_CHAIN = re.compile(
     rf"(?<![\w./-])(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}){{2,}}(?![\d.])", re.I)
+# "the audit pair (fid 3523 → fid 3524)", "superseded pairs (3125→3126, 3156→3157)": id pairs a
+# lineage word introduces name which fact superseded which (2026-10-11 consolidate, cron review #166).
+# Blanked before the arrow rule runs, like a chain; a bare "fid 3517 → fid 3495" merge stays a claim.
+_PROSE_PAIR = rf"(?:{_PROSE_FID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?![\d.])"
+_PROSE_LINEAGE_PAIRS = re.compile(
+    rf"\b(?:pairs?|supersed\w*|supersession|lineage)\b[^\d\n]{{0,25}}{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*", re.I)
 # "Chao 2015 → Guo et al. 2019", "Vernotte 2015 → GRACE-FO": an author-year citation before an arrow
 # traces a lineage, not a write (2026-10-04 dream, 2026-10-09 doc-paper-ingest). Blanked before the
 # arrow rule runs, like a chain. A claim verb or a fid token in the author's place ("Promoted 1983 →",
@@ -2927,7 +2943,7 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
                      + (" …" if len(quiet_updates) > 8 else ""))
     if job_name not in _PROSE_CHECK_REPORTERS:
         claimed = {}
-        unchained = _PROSE_AUTHOR_YEAR.sub(" ", _PROSE_ID_CHAIN.sub(" ", text))
+        unchained = _PROSE_AUTHOR_YEAR.sub(" ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", text)))
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
             for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else text):
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
