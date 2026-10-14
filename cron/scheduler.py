@@ -2870,9 +2870,20 @@ _PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
 # gap, a fid token — "FACTS PROMOTED (2): fids 901, 902" included. (A 60-char gap matched "created facts …
 # I noticed fid 626" on a real report; 25 chars does not.) "already stored as fid 1335" / "previously
 # created fid N" point at an existing fact, not a write (2026-10-08 doc-paper-ingest), so not a claim.
+# The gap never crosses a double quote: '"… branches are removed" not stated by cited fids 3631'
+# (2026-10-14 memory-verify) quoted a fact's wording, and the verb belongs to the quotation.
 _PROSE_CLAIM_BEFORE = re.compile(
-    rf"(?<!already[\s-])(?<!previously[\s-])\b(?P<verb>{_PROSE_CLAIM_VERBS})\b[^.\n]{{0,25}}?"
+    rf"(?<!already[\s-])(?<!previously[\s-])\b(?P<verb>{_PROSE_CLAIM_VERBS})\b[^.\n\"“”]{{0,25}}?"
     rf"{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})", re.I)
+# A double-quoted span on one line is a quotation of some other text (a fact, a note, a log line), so
+# a claim verb inside it states nothing this run did. Emptied before every claim rule runs ("" stays,
+# so a verb BEFORE the quotation still cannot reach a fid after it); capped at 300 chars and one line so
+# a lone " (inches, a typo) cannot hide the rest of a report. The "named" test reads the original text.
+_PROSE_QUOTED = re.compile(r"\"[^\"\n]{1,300}\"|“[^“”\n]{1,300}”")
+# A number right after a math operator is a value, not a fid: "N=128→0.361" (2026-10-14 memory-verify)
+# quoted a degree sweep and was read as the claim "→ 128". Not < or >: the ">" of a "->" arrow, or a
+# "> " blockquote, may stand right before a real id.
+_PROSE_NOT_AFTER_OPERATOR = r"(?<![=≈~≤≥±×])(?<![=≈~≤≥±×]\s)"
 # "Retired: 3275, 3276", "Designed: 3328": verb, colon, bare ids
 _PROSE_CLAIM_COLON = re.compile(
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\s*:\s*(?P<ids>{_PROSE_BARE_LIST})(?![\d.])", re.I)
@@ -2887,7 +2898,7 @@ _PROSE_ARROW_TARGET = (
 )
 # "3274/3275/3276 → researched", "fid 3273 -> demoted": ids right before an arrow into a write's result
 _PROSE_CLAIM_AFTER = re.compile(
-    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-])(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)"
+    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-]){_PROSE_NOT_AFTER_OPERATOR}(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)"
     rf"(?=\s*(?:{_PROSE_ARROW_TARGET}))", re.I)
 # "3371→3375→3377": three or more ids joined by arrows trace a lineage, not a write — the 10-07
 # consolidate report named such a chain while judging it "not duplicates". Blanked before the arrow
@@ -2943,9 +2954,10 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
                      + (" …" if len(quiet_updates) > 8 else ""))
     if job_name not in _PROSE_CHECK_REPORTERS:
         claimed = {}
-        unchained = _PROSE_AUTHOR_YEAR.sub(" ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", text)))
+        unquoted = _PROSE_QUOTED.sub('""', text)  # an empty quotation still stops a verb's gap
+        unchained = _PROSE_AUTHOR_YEAR.sub(" ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", unquoted)))
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
-            for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else text):
+            for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else unquoted):
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
                 for tok in re.findall(r"\d{1,6}", ids):
                     claimed.setdefault(int(tok), m.group("verb").lower())

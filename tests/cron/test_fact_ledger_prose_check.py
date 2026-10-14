@@ -102,6 +102,55 @@ class TestProseCheckPure:
         problems, _ = _prose_check(f"research: {claim}.", [], [], [], [], [])
         assert len(problems) == 1
 
+    @pytest.mark.parametrize("value", ["N=128→0.361", "N = 128 → 0.361", "λ≈500 -> 2500", "n≤128→0.4"])
+    def test_a_number_after_a_math_operator_is_a_value_not_an_id(self, value):
+        # 2026-10-14 memory-verify: "degree sweep numbers N=16→0.401 through N=128→0.361" quoted a
+        # fact's numbers and was read as the claim "→ 128".
+        resp = f"fid 2106: verified — all specifics ({value}) occur in the source note"
+        problems, _ = _prose_check(resp, [], [], [], [], [], job_name="memory-verify")
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", ["> 3274 → CONFIRMED", "research: 3274 → CONFIRMED (n = 12)"])
+    def test_a_bare_id_after_a_blockquote_or_beside_a_value_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and "3274" in problems[0]
+
+    @pytest.mark.parametrize("quoted", [
+        '"session\'s worktrees and branches are removed" not stated by cited fids 3631 or 3632',
+        '“the duplicate was merged” per fid 3631',
+        'the note says "stored fid 3631 and demoted fid 3632" verbatim',
+    ])
+    def test_a_verb_inside_quoted_text_is_a_quotation_not_a_claim(self, quoted):
+        # 2026-10-14 memory-verify: a re-queue line quoted a fact's wording ("… branches are removed")
+        # and the 25-char gap after the verb ran past the closing quote into "cited fids 3631".
+        resp = f"host/ring-review-note (fid 3608): re-queued — {quoted}"
+        problems, _ = _prose_check(resp, [], [], [], [], [], job_name="memory-verify")
+        assert problems == []
+
+    def test_the_whole_10_14_memory_verify_report_is_clean(self):
+        resp = (
+            "Memory Verify — generated 2026-10-14\n\n"
+            "fid 2105: verified — flagged specific \"/0.5/0.93031\" IS in the source note line 66\n"
+            "fid 2106: verified — all specifics (structural proof, degree sweep numbers N=16→0.401 through "
+            "N=128→0.361, 60-sat crossover) occur in the source note\n\n"
+            "host/ring-review-note-2026-10-12 (fid 3608): re-queued — \"session's worktrees and "
+            "branches are removed\" not stated by cited fids 3631 or 3632\n")
+        problems, _ = _prose_check(resp, [], [], [], [], [], job_name="memory-verify")
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", ['Stored fid 3631 ("worktree cleanup lesson").',
+                                       'removed fid 3631 — "stale"',
+                                       'a stray " quote, then removed fid 3631'])
+    def test_a_claim_outside_quotes_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and "3631" in problems[0]
+
+    def test_an_unclosed_quote_does_not_hide_the_rest_of_the_report(self):
+        # a lone " (inches, a typo) must not blank the lines after it
+        resp = 'Panel is 30" wide.\nremoved fid 3631 and fid 3632'
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert len(problems) == 1 and "3631" in problems[0] and "3632" in problems[0]
+
     def test_a_bare_stored_as_fid_is_still_a_claim(self):
         problems, _ = _prose_check("The earlier paper is stored as fid 1335.", [], [], [], [], [])
         assert len(problems) == 1 and "stored 1335" in problems[0]
