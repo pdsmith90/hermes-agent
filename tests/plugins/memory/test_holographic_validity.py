@@ -249,3 +249,29 @@ class TestReadPath:
         (row,) = store.list_facts(category="lesson", limit=5)
         assert "valid_from" in row and "valid_until" in row
         assert row["valid_until"] is None
+
+
+class TestHelpfulVoteCannotReviveARetractedFact:
+    def test_helpful_vote_holds_trust_of_a_retracted_fact(self, store):
+        old = store.add_fact("LESSON: stale verdict.")
+        store.add_fact(f"LESSON: this supersedes fid {old}.")
+        assert _window(store, old)[2] is not None
+        before = _trust(store, old)
+        out = store.record_feedback(old, helpful=True)
+        assert _trust(store, old) == pytest.approx(before)
+        assert out["new_trust"] == pytest.approx(before)
+        assert out["trust_held"] is True
+        assert out["helpful_count"] == 1
+
+    def test_helpful_vote_still_raises_a_live_fact(self, store):
+        live = store.add_fact("LESSON: a current finding.")
+        out = store.record_feedback(live, helpful=True)
+        assert out["new_trust"] > out["old_trust"]
+        assert out["trust_held"] is False
+
+    def test_unhelpful_vote_still_lowers_a_retracted_fact(self, store):
+        old = store.add_fact("LESSON: stale verdict.")
+        store.add_fact(f"LESSON: this supersedes fid {old}.")
+        out = store.record_feedback(old, helpful=False)
+        assert out["new_trust"] < out["old_trust"]
+        assert out["trust_held"] is False

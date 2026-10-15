@@ -1701,20 +1701,25 @@ class MemoryStore:
         per-run ledger, so a mass helpful=False downgrade would have left no
         audit trail (fid 737 on 2026-08-19 proved the blind spot).
 
-        Returns a dict with fact_id, old_trust, new_trust, helpful_count.
-        Raises KeyError if fact_id does not exist.
+        Returns a dict with fact_id, old_trust, new_trust, helpful_count,
+        trust_held. Raises KeyError if fact_id does not exist.
         """
         with self._lock:
             row = self._conn.execute(
-                "SELECT fact_id, trust_score, helpful_count FROM facts WHERE fact_id = ?",
+                "SELECT fact_id, trust_score, helpful_count, valid_until"
+                " FROM facts WHERE fact_id = ?",
                 (fact_id,),
             ).fetchone()
             if row is None:
                 raise KeyError(f"fact_id {fact_id} not found")
 
             old_trust: float = row["trust_score"]
-            delta = _HELPFUL_DELTA if helpful else _UNHELPFUL_DELTA
-            new_trust = _clamp_trust(old_trust + delta)
+            trust_held = bool(helpful and row["valid_until"] is not None)
+            if trust_held:
+                new_trust = old_trust
+            else:
+                delta = _HELPFUL_DELTA if helpful else _UNHELPFUL_DELTA
+                new_trust = _clamp_trust(old_trust + delta)
 
             helpful_increment = 1 if helpful else 0
             with self._write_txn():
@@ -1727,6 +1732,13 @@ class MemoryStore:
                         updated_at     = CURRENT_TIMESTAMP
                     WHERE fact_id = ?
                     """,
+        A helpful vote on a fact whose validity window is closed (valid_until
+        set) leaves trust untouched: the demotion that retracted it pinned the
+        row at the search floor on purpose, and a late vote (a session-credit
+        hook firing after the retraction) must not lift it back above that
+        floor. The vote is still counted and snapshotted; the result carries
+        ``trust_held: True``. helpful=False is unaffected.
+
                     (new_trust, helpful_increment, fact_id),
                 )
 
@@ -1767,6 +1779,7 @@ class MemoryStore:
                 seen.add(stripped.lower())
                 candidates.append(stripped)
 
+                "trust_held":   trust_held,
         multiword_spans = []
         for m in _RE_CAPITALIZED.finditer(text):
             _add(m.group(1))
