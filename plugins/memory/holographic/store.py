@@ -940,9 +940,8 @@ class MemoryStore:
         returns before this, so re-writing the same fact cannot demote its
         target twice — and from update_fact, which passes *previous* so that
         only retractions the edit ADDED are acted on. An edit may also retract
-        a NEWER fact that already exists (see the loop below); the validity
-        window of such a target is not closed, because invalidate_fact refuses
-        a superseding id that is not strictly newer.
+        a NEWER fact that already exists (see the loop below); its validity
+        window is closed too, at the edit's updated_at (see invalidate_fact).
 
         Deliberately here rather than in the scheduler's per-run ledger: the
         ledger sees only what the nightly cron writes, while every writer on the
@@ -1005,7 +1004,10 @@ class MemoryStore:
             # Trust and validity are answering different questions here and
             # must not share a control flow.
             try:
-                self.invalidate_fact(target, superseded_by=fact_id)
+                self.invalidate_fact(
+                    target, superseded_by=fact_id,
+                    retracted_by_edit=target > fact_id,
+                )
             except Exception:
                 logger.warning(
                     "validity-window close failed for fid %s (retracted by %s)",
@@ -1090,8 +1092,18 @@ class MemoryStore:
             return []                                        # pre-migration store
         return [int(r["fact_id"]) for r in rows]
 
-    def invalidate_fact(self, fact_id: int, superseded_by: int) -> bool:
+    def invalidate_fact(
+        self, fact_id: int, superseded_by: int, *, retracted_by_edit: bool = False
+    ) -> bool:
         """Close *fact_id*'s validity window at the moment *superseded_by* was written.
+
+        ``retracted_by_edit`` is for _demote_superseded's update path only: an
+        edit to an OLDER fact may retract a newer one that already exists. Such
+        a retraction happened when the edit was made, not when the retractor
+        was created (that would put valid_until before the target's own
+        valid_from), so the close time is the retractor's updated_at and the
+        strictly-newer requirement is waived. Self-retraction is still refused,
+        and FIRST CLOSE WINS applies unchanged.
 
         Returns True only when this call actually moved the column — a window
         already closed, an unknown fact on either side, or a superseding id
@@ -1123,13 +1135,19 @@ class MemoryStore:
         close is the two `feedback` snapshots _demote_superseded writes, each
         stamped "retracted by fid N", plus the retracting fact's own prose.
         """
-        if not 0 < fact_id < superseded_by:
-            return False
+        if retracted_by_edit:
+            if fact_id <= 0 or fact_id == superseded_by:
+                return False
+            closed_at_col = "updated_at"
+        else:
+            if not 0 < fact_id < superseded_by:
+                return False
+            closed_at_col = "created_at"
         with self._lock:
             cur = self._conn.execute(
-                """
+                f"""
                 UPDATE facts
-                   SET valid_until = (SELECT created_at FROM facts
+                   SET valid_until = (SELECT {closed_at_col} FROM facts
                                        WHERE fact_id = :newer),
                        superseded_by = :newer
                  WHERE fact_id = :older

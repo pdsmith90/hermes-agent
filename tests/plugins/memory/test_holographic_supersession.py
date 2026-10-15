@@ -151,6 +151,20 @@ class TestUpdateMayRetractANewerFact:
         )
         assert _trust(store, newer) == pytest.approx(0.30)
         assert _trust(store, older) == pytest.approx(0.5)
+        row = store._conn.execute(
+            "SELECT valid_until, superseded_by FROM facts WHERE fact_id = ?", (newer,)
+        ).fetchone()
+        assert row["valid_until"] is not None
+        assert row["superseded_by"] == older
+        # First close wins: a second edit naming it again does not move the window.
+        closed_at = row["valid_until"]
+        store.update_fact(
+            older, content=f"LESSON: the close-out, which supersedes fid {newer} again."
+        )
+        row = store._conn.execute(
+            "SELECT valid_until FROM facts WHERE fact_id = ?", (newer,)
+        ).fetchone()
+        assert row["valid_until"] == closed_at
 
     def test_creating_a_fact_still_cannot_retract_a_newer_one(self, store):
         first = store.add_fact("LESSON: a placeholder.")
@@ -167,6 +181,10 @@ class TestUpdateMayRetractANewerFact:
             older, content=f"LESSON: the original verdict, which supersedes fid {newer}."
         )
         assert _trust(store, newer) == pytest.approx(0.5)
+        row = store._conn.execute(
+            "SELECT valid_until, superseded_by FROM facts WHERE fact_id = ?", (newer,)
+        ).fetchone()
+        assert row["valid_until"] is None and row["superseded_by"] is None
 
     def test_an_edit_naming_a_missing_or_passive_target_changes_nothing(self, store):
         older = store.add_fact("LESSON: the first.")
@@ -176,3 +194,4 @@ class TestUpdateMayRetractANewerFact:
             content=f"LESSON: the first, superseded by fid {newer}; supersedes fid 999999.",
         )
         assert _trust(store, newer) == pytest.approx(0.5)
+
