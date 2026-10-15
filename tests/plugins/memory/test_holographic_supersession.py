@@ -139,3 +139,40 @@ class TestWriteIsNeverLost:
         assert new > old
         assert store.get_fact(new) is not None
         assert _trust(store, old) == pytest.approx(0.5)
+
+
+class TestUpdateMayRetractANewerFact:
+    def test_an_edit_can_retract_a_newer_existing_fact(self, store):
+        older = store.add_fact("LESSON: the close-out of the first task.")
+        newer = store.add_fact("LESSON: a distilled mirror of the first close-out.")
+        assert newer > older
+        store.update_fact(
+            older, content=f"LESSON: the close-out, which supersedes fid {newer}."
+        )
+        assert _trust(store, newer) == pytest.approx(0.30)
+        assert _trust(store, older) == pytest.approx(0.5)
+
+    def test_creating_a_fact_still_cannot_retract_a_newer_one(self, store):
+        first = store.add_fact("LESSON: a placeholder.")
+        newer = first + 1
+        writer = store.add_fact(f"LESSON: this supersedes fid {newer}.")
+        assert writer == first + 1
+        assert _trust(store, writer) == pytest.approx(0.5)
+
+    def test_an_edit_cannot_retract_a_newer_fact_that_retracts_it(self, store):
+        older = store.add_fact("LESSON: the original verdict.")
+        newer = store.add_fact(f"LESSON: the revised verdict, which supersedes fid {older}.")
+        assert _trust(store, older) == pytest.approx(0.30)
+        store.update_fact(
+            older, content=f"LESSON: the original verdict, which supersedes fid {newer}."
+        )
+        assert _trust(store, newer) == pytest.approx(0.5)
+
+    def test_an_edit_naming_a_missing_or_passive_target_changes_nothing(self, store):
+        older = store.add_fact("LESSON: the first.")
+        newer = store.add_fact("LESSON: the second.")
+        assert store.update_fact(
+            older,
+            content=f"LESSON: the first, superseded by fid {newer}; supersedes fid 999999.",
+        )
+        assert _trust(store, newer) == pytest.approx(0.5)

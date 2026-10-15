@@ -934,12 +934,15 @@ class MemoryStore:
     def _demote_superseded(
         self, fact_id: int, content: str, previous: "str | None" = None
     ) -> list[int]:
-        """Demote any strictly-older fact this one explicitly retracts.
+        """Demote any fact this one explicitly retracts (older only, on create).
 
         Called from the genuine-insert path — the duplicate-content branch
         returns before this, so re-writing the same fact cannot demote its
         target twice — and from update_fact, which passes *previous* so that
-        only retractions the edit ADDED are acted on.
+        only retractions the edit ADDED are acted on. An edit may also retract
+        a NEWER fact that already exists (see the loop below); the validity
+        window of such a target is not closed, because invalidate_fact refuses
+        a superseding id that is not strictly newer.
 
         Deliberately here rather than in the scheduler's per-run ledger: the
         ledger sees only what the nightly cron writes, while every writer on the
@@ -960,11 +963,40 @@ class MemoryStore:
         except Exception:                                    # pragma: no cover
             return demoted
         for target in sorted(targets):
-            # Strictly older only. A fact cannot retract one written after it,
-            # so a forward reference is a parse artefact (or the passive voice
-            # slipping through) and must never cost the newer row its trust.
-            if not 0 < target < fact_id:
+            # Create path: strictly older only. A fact cannot retract one
+            # written after it, so a forward reference there is a parse
+            # artefact (or the passive voice slipping through) and must never
+            # cost the newer row its trust.
+            #
+            # Update path: an edit made today may name a fact written after the
+            # row's creation but before the edit, so a higher id that EXISTS is
+            # a real retraction. _SUPERSESSION_RE only matches the active voice
+            # ("supersedes fid N"), so the passive "superseded by fid N" still
+            # parses to nothing. The one exception is a target whose own text
+            # actively retracts this fact: that pair would demote each other,
+            # so the target's explicit claim stands. A self-reference and a
+            # nonexistent fid are always skipped.
+            if target <= 0 or target == fact_id:
                 continue
+            if target > fact_id:
+                if previous is None:
+                    continue
+                try:
+                    row = self._conn.execute(
+                        "SELECT content FROM facts WHERE fact_id = ?", (target,)
+                    ).fetchone()
+                    if row is None:
+                        continue
+                    if fact_id in {
+                        int(m) for m in _SUPERSESSION_RE.findall(row["content"])
+                    }:
+                        continue
+                except Exception:
+                    logger.warning(
+                        "newer-target check failed for fid %s (named by %s)",
+                        target, fact_id, exc_info=True,
+                    )
+                    continue
             # Close the retracted fact's validity window BEFORE the trust loop,
             # and OUTSIDE it. The loop breaks on its first iteration whenever
             # the target already sits at the floor — the normal state for a
@@ -1695,6 +1727,13 @@ class MemoryStore:
         helpful=True  -> trust += 0.05, helpful_count += 1
         helpful=False -> trust -= 0.10
 
+        A helpful vote on a fact whose validity window is closed (valid_until
+        set) leaves trust untouched: the demotion that retracted it pinned the
+        row at the search floor on purpose, and a late vote (a session-credit
+        hook firing after the retraction) must not lift it back above that
+        floor. The vote is still counted and snapshotted; the result carries
+        ``trust_held: True``. helpful=False is unaffected.
+
         Snapshots the pre-feedback row into fact_history (op='feedback',
         stamped with *changed_by*) — before this, a feedback write was the
         one mutation path invisible to both fact_history and the scheduler's
@@ -1732,13 +1771,6 @@ class MemoryStore:
                         updated_at     = CURRENT_TIMESTAMP
                     WHERE fact_id = ?
                     """,
-        A helpful vote on a fact whose validity window is closed (valid_until
-        set) leaves trust untouched: the demotion that retracted it pinned the
-        row at the search floor on purpose, and a late vote (a session-credit
-        hook firing after the retraction) must not lift it back above that
-        floor. The vote is still counted and snapshotted; the result carries
-        ``trust_held: True``. helpful=False is unaffected.
-
                     (new_trust, helpful_increment, fact_id),
                 )
 
@@ -1747,6 +1779,7 @@ class MemoryStore:
                 "old_trust":    old_trust,
                 "new_trust":    new_trust,
                 "helpful_count": row["helpful_count"] + helpful_increment,
+                "trust_held":   trust_held,
             }
 
     # ------------------------------------------------------------------
@@ -1779,7 +1812,6 @@ class MemoryStore:
                 seen.add(stripped.lower())
                 candidates.append(stripped)
 
-                "trust_held":   trust_held,
         multiword_spans = []
         for m in _RE_CAPITALIZED.finditer(text):
             _add(m.group(1))
