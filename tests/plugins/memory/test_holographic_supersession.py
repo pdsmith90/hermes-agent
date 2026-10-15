@@ -195,3 +195,52 @@ class TestUpdateMayRetractANewerFact:
         )
         assert _trust(store, newer) == pytest.approx(0.5)
 
+
+def _state(store, fact_id):
+    row = store._conn.execute(
+        "SELECT trust_score, valid_until, superseded_by FROM facts WHERE fact_id = ?",
+        (fact_id,),
+    ).fetchone()
+    return row["trust_score"], row["valid_until"], row["superseded_by"]
+
+
+class TestOnlyTheWritersOwnRetractionFires:
+    @pytest.mark.parametrize("q_open, q_close", [("'", "'"), ('"', '"'), ("\u2018", "\u2019"), ("\u201c", "\u201d")])
+    def test_a_quoted_retraction_is_not_the_writers_act(self, store, q_open, q_close):
+        reported = store.add_fact("LESSON: the first close-out of the task.")
+        target = store.add_fact("LESSON: a distilled mirror of that close-out.")
+        store.add_fact(
+            f"LESSON: review: fid {reported}'s {q_open}supersedes fid {target}{q_close}"
+            " never took effect."
+        )
+        assert _state(store, target) == (pytest.approx(0.5), None, None)
+
+    def test_a_third_partys_reported_retraction_is_not_the_writers_act(self, store):
+        reporter = store.add_fact("LESSON: the later synthesis.")
+        target = store.add_fact("LESSON: a stale verdict on the topic.")
+        store.add_fact(
+            f"LESSON: synthesis notes (fid {reporter} corrects fid {target}) and moves on."
+        )
+        assert _state(store, target) == (pytest.approx(0.5), None, None)
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "LESSON: this fact supersedes fid {t}.",
+            "LESSON: a fresh summary (checked twice; supersedes fid {t}, which said otherwise).",
+            "LESSON: this fact (fid {w}) supersedes fid {t}.",
+        ],
+    )
+    def test_a_plain_active_retraction_still_fires(self, store, template):
+        writer_slot = store.add_fact("LESSON: placeholder to advance the id.")
+        target = store.add_fact("LESSON: a stale verdict on the topic.")
+        writer = store.add_fact(template.format(t=target, w=writer_slot))
+        trust, until, by = _state(store, target)
+        assert trust == pytest.approx(0.30)
+        assert until is not None and by == writer
+
+    def test_a_fact_naming_itself_as_the_retractor_still_fires(self, store):
+        target = store.add_fact("LESSON: a stale verdict on the topic.")
+        writer = target + 1
+        assert store.add_fact(f"LESSON: fid {writer} corrects fid {target}.") == writer
+        assert _state(store, target)[0] == pytest.approx(0.30)

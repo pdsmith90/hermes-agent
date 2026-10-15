@@ -159,6 +159,35 @@ _SUPERSESSION_RE = re.compile(
     r"refutes?|invalidates?|obsoletes?)\s+fid[\s=:#]*(\d{1,7})\b",
     re.IGNORECASE,
 )
+_QUOTE_CHARS = "'\"\u2018\u2019\u201c\u201d"
+_FID_BEFORE_RE = re.compile(r"\bfid[\s=:#]*(\d{1,7})\s+$", re.IGNORECASE)
+
+
+def _active_retractions(text: str, fact_id: int) -> set:
+    """The fids that the fact *fact_id* (whose text is *text*) retracts ITSELF.
+
+    _SUPERSESSION_RE finds the phrase; this drops the matches that are someone
+    else's retraction being quoted or reported, which are not this fact's act:
+      * the verb phrase directly enclosed in quotes, a quote mark immediately
+        before the verb and one immediately after the id
+        (``fid 3495's 'supersedes fid 3517' never took effect``);
+      * the verb immediately preceded by a DIFFERENT fact reference
+        (``(fid 3630 corrects fid 2320)`` written by some other fact).
+    ``fid <fact_id> corrects fid N`` in the fact's own text still counts, and so
+    does any plain ``this supersedes fid N``.
+    """
+    out = set()
+    for m in _SUPERSESSION_RE.finditer(text or ""):
+        before, after = text[: m.start()], text[m.end():]
+        if before and before[-1] in _QUOTE_CHARS and after and after[0] in _QUOTE_CHARS:
+            continue
+        third = _FID_BEFORE_RE.search(before)
+        if third and int(third.group(1)) != fact_id:
+            continue
+        out.add(int(m.group(1)))
+    return out
+
+
 # Floor, not a fixed delta: a fact may be retracted by several later facts, and
 # three mentions should not drive a row to zero. 0.30 keeps it at the default
 # search floor — still reachable, ranked below anything that corrected it.
@@ -955,10 +984,10 @@ class MemoryStore:
         """
         demoted: list[int] = []
         try:
-            targets = {int(m) for m in _SUPERSESSION_RE.findall(content)}
+            targets = _active_retractions(content, fact_id)
             if previous is not None:
                 # The update path: act only on retractions this edit ADDED.
-                targets -= {int(m) for m in _SUPERSESSION_RE.findall(previous)}
+                targets -= _active_retractions(previous, fact_id)
         except Exception:                                    # pragma: no cover
             return demoted
         for target in sorted(targets):
@@ -986,9 +1015,7 @@ class MemoryStore:
                     ).fetchone()
                     if row is None:
                         continue
-                    if fact_id in {
-                        int(m) for m in _SUPERSESSION_RE.findall(row["content"])
-                    }:
+                    if fact_id in _active_retractions(row["content"], target):
                         continue
                 except Exception:
                     logger.warning(
