@@ -2872,8 +2872,12 @@ _PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
 # created fid N" point at an existing fact, not a write (2026-10-08 doc-paper-ingest), so not a claim.
 # The gap never crosses a double quote: '"… branches are removed" not stated by cited fids 3631'
 # (2026-10-14 memory-verify) quoted a fact's wording, and the verb belongs to the quotation.
+# A verb right after "in" describes facts ("Already well-captured in stored facts (fids 755, 817)",
+# 2026-10-16 doc-paper-ingest), and a negation in the gap denies the write ("Lessons stored: None new —
+# fid 3257", 2026-10-05 daily-review): neither is a claim (cron review #168).
 _PROSE_CLAIM_BEFORE = re.compile(
-    rf"(?<!already[\s-])(?<!previously[\s-])\b(?P<verb>{_PROSE_CLAIM_VERBS})\b[^.\n\"“”]{{0,25}}?"
+    rf"(?<!already[\s-])(?<!previously[\s-])(?<!\bin\s)\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
+    rf"(?:(?!\b(?:none|no|nothing|not)\b)[^.\n\"“”]){{0,25}}?"
     rf"{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})", re.I)
 # A double-quoted span on one line is a quotation of some other text (a fact, a note, a log line), so
 # a claim verb inside it states nothing this run did. Emptied before every claim rule runs ("" stays,

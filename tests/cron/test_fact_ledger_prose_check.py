@@ -151,6 +151,27 @@ class TestProseCheckPure:
         problems, _ = _prose_check(resp, [], [], [], [], [])
         assert len(problems) == 1 and "3631" in problems[0] and "3632" in problems[0]
 
+    @pytest.mark.parametrize("resp", [
+        # 2026-10-16 doc-paper-ingest, word for word except the project name
+        "Project doc check: Project-Alpha FINAL_STATUS.md confirms implementation is 100% complete. "
+        "Already well-captured in stored facts (fids 755, 817) — no update needed.",
+        # 2026-10-05 daily-review
+        "**Lessons stored:** None new — fid 3257 (repeat_penalty fix) and fid 3252 (JSON parse) cover it",
+        "removed nothing; fid 3631 stays",
+    ])
+    def test_a_verb_after_in_or_a_negated_verb_names_existing_facts(self, resp):
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", [
+        "bumped fid 3316 (shared-scratchpad lesson already stored)",  # 2026-10-06: a real phantom bump
+        "stored facts 3740, 3741 from tonight's papers",
+        "Fixed: stored fid 3740 in facts about GRACE",
+    ])
+    def test_a_plain_or_attributive_free_verb_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and "recorded no such write" in problems[0]
+
     def test_a_bare_stored_as_fid_is_still_a_claim(self):
         problems, _ = _prose_check("The earlier paper is stored as fid 1335.", [], [], [], [], [])
         assert len(problems) == 1 and "stored 1335" in problems[0]
