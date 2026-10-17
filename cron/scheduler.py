@@ -2922,6 +2922,11 @@ _PROSE_LINEAGE_PAIRS = re.compile(
 _PROSE_AUTHOR_YEAR = re.compile(
     rf"\b(?!(?i:{_PROSE_CLAIM_VERBS}|fids?|fact_ids?|facts?)\b)[A-Z][\w'’-]+"
     r"(?:\s+(?:et\s+al\.?|(?:&|and)\s+[A-Z][\w'’-]+))?,?\s+\(?(?:19|20)\d\d[a-z]?\)?(?=\s*(?:→|->))")
+# "TICK_MS 220→1000", "cache_ram: 8192 -> 0": a snake_case or SCREAMING_CASE setting before "N → M" names
+# a value change, not a write (2026-10-17 memory-verify, cron review #168). Blanked before the arrow rule
+# runs, like a chain. fact_id is a fid token, not a setting: "fact_id 3381 → 3391" stays a claim.
+_PROSE_SETTING_CHANGE = re.compile(
+    r"\b(?!fact_ids?\b)[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*:?\s+\d+\s*(?:→|->)\s*\d+", re.I)
 # Jobs whose report is ABOUT other jobs' writes: their claim verbs name facts they never touched.
 _PROSE_CHECK_REPORTERS = frozenset({"morning-briefing"})
 
@@ -2959,7 +2964,8 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
     if job_name not in _PROSE_CHECK_REPORTERS:
         claimed = {}
         unquoted = _PROSE_QUOTED.sub('""', text)  # an empty quotation still stops a verb's gap
-        unchained = _PROSE_AUTHOR_YEAR.sub(" ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", unquoted)))
+        unchained = _PROSE_SETTING_CHANGE.sub(" ", _PROSE_AUTHOR_YEAR.sub(
+            " ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", unquoted))))
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
             for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else unquoted):
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""

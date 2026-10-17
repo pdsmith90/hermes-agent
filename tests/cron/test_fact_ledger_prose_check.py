@@ -110,6 +110,19 @@ class TestProseCheckPure:
         problems, _ = _prose_check(resp, [], [], [], [], [], job_name="memory-verify")
         assert problems == []
 
+    @pytest.mark.parametrize("value", ["TICK_MS 220→1000", "cache_ram: 8192 -> 0", "max_tokens 4096 → 8192"])
+    def test_a_setting_before_a_value_change_is_not_an_id(self, value):
+        # 2026-10-17 memory-verify, word for word apart from the setting under test
+        resp = (f"fid 3756: verified — all specifics (opencode.db path, `/opencode`, {value}, "
+                "v0.2.1 10-16 15:20) present in source note")
+        problems, _ = _prose_check(resp, [], [], [], [], [], job_name="memory-verify")
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", ["fact_id 3381 → 3391", "merged 3381 → 3391", "tick 220 → 1000"])
+    def test_an_arrow_without_a_setting_name_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and ("3381" in problems[0] or "220" in problems[0])
+
     @pytest.mark.parametrize("claim", ["> 3274 → CONFIRMED", "research: 3274 → CONFIRMED (n = 12)"])
     def test_a_bare_id_after_a_blockquote_or_beside_a_value_is_still_a_claim(self, claim):
         problems, _ = _prose_check(claim, [], [], [], [], [])
