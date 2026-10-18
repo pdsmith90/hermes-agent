@@ -2875,8 +2875,13 @@ _PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
 # A verb right after "in" describes facts ("Already well-captured in stored facts (fids 755, 817)",
 # 2026-10-16 doc-paper-ingest), and a negation in the gap denies the write ("Lessons stored: None new —
 # fid 3257", 2026-10-05 daily-review): neither is a claim (cron review #168).
+# A verb right before a noun and "of" describes something derived from the fact: "promoted copy of fid
+# 3464" (2026-10-18 consolidate, cron review #173) names what 3472 was copied FROM, and the only write
+# to 3464 that night was another job's — unless the noun is a property of the fact itself ("bumped
+# trust of fid 3464" writes 3464).
 _PROSE_CLAIM_BEFORE = re.compile(
     rf"(?<!already[\s-])(?<!previously[\s-])(?<!\bin\s)\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
+    rf"(?!\s+(?!(?:trust|trust_score|content|category|tags?|validity|wording|text|body)\b)[a-z][a-z_-]*\s+of\b)"
     rf"(?:(?!\b(?:none|no|nothing|not)\b)[^.\n\"“”]){{0,25}}?"
     rf"{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})", re.I)
 # A double-quoted span on one line is a quotation of some other text (a fact, a note, a log line), so

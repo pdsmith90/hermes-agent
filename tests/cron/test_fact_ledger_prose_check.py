@@ -194,6 +194,18 @@ class TestProseCheckPure:
         problems, notes = _prose_check(resp, _rows(3323, 3324), [], _rows(3272), [], [])
         assert problems == [] and notes == []
 
+    def test_a_verb_before_a_noun_and_of_names_the_source_fact(self):
+        """2026-10-18 consolidate (cron review #173): "fid 3472 (memory-entry, promoted copy of fid 3464)
+        updated to reference the full lesson at fid 3464" — 3464 is what 3472 was copied FROM, and the
+        only write to it that night was another job's. A property of the fact itself is the fact:
+        "bumped trust of fid 3464" still claims a write to 3464."""
+        resp = ("- **Hook guard memory-entry:** fid 3472 (memory-entry, promoted copy of fid 3464) updated "
+                "to reference the full lesson at fid 3464 instead of carrying a stale trust stamp.")
+        problems, _ = _prose_check(resp, [], [], _rows(3472), [], [])
+        assert problems == []
+        problems, _ = _prose_check("Bumped trust of fid 3464 to 1.0.", [], [], [], [], [])
+        assert any("bumped 3464" in p for p in problems)
+
     def test_unnamed_updates_are_a_note_not_a_problem(self):
         resp = "Claude Memory Distill — 3 notes → 3337/3338/3339; updated 8"
         problems, notes = _prose_check(resp, _rows(3337, 3338, 3339), [], _rows(1789, 1999, 2000, 2031, 2032, 3334, 3335, 3336), [], [])
