@@ -825,8 +825,10 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
                 if status == "completed" and not report_paths:
                     gaps.append(f"{name}: completed execution has no saved report file")
                 mismatch = row.get("ledger_mismatch")
+                # "false positive" is how #169 (2026-10-17) tells the briefing to carry a mismatch it
+                # verified, on the job's own line (2026-10-18, #174).
                 if mismatch and not any(
-                    re.search(r"\b(ledger|prose|mismatch|unreported|claims?)\b", line, re.I)
+                    re.search(r"\b(ledger|prose|mismatch|unreported|claims?|false[\s-]positives?)\b", line, re.I)
                     for line in matching_lines
                 ):
                     gaps.append(f"{name}: ledger/prose mismatch — {str(mismatch)[:200]}; {unflagged}")

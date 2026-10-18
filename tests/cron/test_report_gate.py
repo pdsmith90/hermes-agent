@@ -102,6 +102,33 @@ class TestMorningBriefingCoverageGate:
         assert _enforce_morning_briefing_coverage(
             {"name": "morning-briefing"}, _manifest_prompt(manifest), carried) == carried
 
+    def test_a_mismatch_the_briefing_explains_as_a_false_positive_is_flagged(self):
+        """2026-10-18 (#174): since #169 (10-17) the briefing puts a mismatch it verified as a false
+        positive on the job's What Happened line, in those words. The gate's vocabulary did not have
+        them, so the 10-18 phone briefing ended with "ledger/prose mismatch … not flagged" two lines
+        under its own verdict."""
+        manifest = {
+            "version": 1,
+            "date": "2026-10-18",
+            "execution_ledger_available": True,
+            "executions": [
+                {"job_id": "962700c37c88", "name": "consolidate-synthesize", "status": "completed",
+                 "delivery": "suppressed", "issue": None,
+                 "ledger_mismatch": "PROBLEM — claims promoted 3464 but the store recorded no such write",
+                 "report_files": ["cron/output/962700c37c88/2026-10-18_03-26-33.md"]},
+            ],
+            "report_files": [
+                {"job_id": "962700c37c88", "name": "consolidate-synthesize",
+                 "path": "cron/output/962700c37c88/2026-10-18_03-26-33.md"},
+            ],
+            "unmatched_report_files": [],
+        }
+        carried = ("Morning Briefing — 2026-10-18\n\n**What Happened Overnight**\n"
+                   "- consolidate-synthesize: Antigravity cluster synthesis 3766; updated 3472 — manifest's "
+                   "\"promoted 3464\" flag is a false positive (3464 hit 1.0 via weekly-trace-mining, not this job)\n")
+        assert _enforce_morning_briefing_coverage(
+            {"name": "morning-briefing"}, _manifest_prompt(manifest), carried) == carried
+
     def test_coverage_checks_the_last_report_draft_that_will_be_delivered(self):
         manifest = {
             "version": 1,
