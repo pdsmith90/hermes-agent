@@ -120,6 +120,7 @@ async def test_shutdown_notice_reaches_every_served_profiles_home_channel(monkey
     ``gateway_restart_notification=false`` opt-out is honoured from ITS config.
     """
     monkeypatch.setattr("gateway.drain_control.drain_notification_suppressed", lambda: False)
+    monkeypatch.setattr("gateway.run_shutdown._service_manager_stopping", lambda: False)
     r = _runner()
     r.config = _home_config(Platform.TELEGRAM, "8776018003")
     r._profile_configs = {
@@ -135,3 +136,55 @@ async def test_shutdown_notice_reaches_every_served_profiles_home_channel(monkey
     assert r.adapters[Platform.TELEGRAM].sent == ["8776018003"]
     assert r._profile_adapters["sec"][Platform.TELEGRAM].sent == ["8776018003"], "own bot, own conversation"
     assert r._profile_adapters["quiet"][Platform.DISCORD].sent == [], "served profile's opt-out is its own"
+
+
+@pytest.mark.asyncio
+async def test_home_channel_broadcast_is_silent_while_the_service_manager_is_stopping(monkeypatch):
+    """A reboot or poweroff stops every user unit, so the broadcast would only tell the operator what
+    they just did (2026-10-18 KDE-menu reboot, phone message #660 — cron review #175). Per-session
+    pings are not a broadcast and still go out, exactly as under a quiet drain marker."""
+    monkeypatch.setattr("gateway.drain_control.drain_notification_suppressed", lambda: False)
+    monkeypatch.setattr("gateway.run_shutdown._service_manager_stopping", lambda: True)
+    r = _runner()
+    r.config = _home_config(Platform.TELEGRAM, "8776018003")
+    r._profile_configs = {"sec": _home_config(Platform.TELEGRAM, "8776018003")}
+    r._profile_adapters = {"sec": {Platform.TELEGRAM: _Adapter()}}
+    r._served_profile_homes = {}
+    r._running_agents["agent:sec:telegram:dm:42"] = object()
+    r._snapshot_running_agents = lambda: list(r._running_agents)
+
+    await r._notify_active_sessions_of_shutdown()
+
+    assert r._profile_adapters["sec"][Platform.TELEGRAM].sent == ["42"], "the per-session ping stays"
+    assert r.adapters[Platform.TELEGRAM].sent == []
+
+
+def test_service_manager_stopping_reads_systemctl(monkeypatch):
+    """``systemctl is-system-running`` prints ``stopping`` for the system and the user manager alike;
+    anything else, a missing systemctl or a failing probe reads as not stopping — the louder default.
+    Outside systemd (no INVOCATION_ID, parent not PID 1) nothing is even asked."""
+    from gateway import run_shutdown as rs
+    seen = []
+
+    def fake_run(cmd, **kw):
+        seen.append(cmd)
+        return SimpleNamespace(stdout="stopping\n" if "--user" in cmd else "running\n")
+
+    monkeypatch.setattr(rs.subprocess, "run", fake_run)
+    monkeypatch.setattr(rs.os, "getppid", lambda: 4242)
+    monkeypatch.delenv("INVOCATION_ID", raising=False)
+    assert rs._service_manager_stopping() is False
+    assert seen == [], "not under systemd: no probe at all"
+
+    monkeypatch.setenv("INVOCATION_ID", "0123")
+    assert rs._service_manager_stopping() is True
+    assert seen == [["systemctl", "is-system-running"], ["systemctl", "--user", "is-system-running"]]
+
+    monkeypatch.setattr(rs.subprocess, "run", lambda cmd, **kw: SimpleNamespace(stdout="degraded\n"))
+    assert rs._service_manager_stopping() is False
+
+    def missing(cmd, **kw):
+        raise FileNotFoundError("systemctl")
+
+    monkeypatch.setattr(rs.subprocess, "run", missing)
+    assert rs._service_manager_stopping() is False

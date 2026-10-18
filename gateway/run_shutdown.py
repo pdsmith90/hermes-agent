@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -129,6 +130,27 @@ def _log_suppressed(level: int, msg: str, *args, exc_info: bool = False):
             logger.log(level, msg, *args, exc_info=(type(exc), exc, exc.__traceback__))
         else:
             logger.log(level, msg, *args, exc)
+
+
+def _service_manager_stopping(timeout: float = 2.0) -> bool:
+    """True while the system or this user's service manager is shutting down (reboot, poweroff).
+
+    ``systemctl is-system-running`` prints ``stopping`` from the moment shutdown.target is queued,
+    before the user manager sends this unit its SIGTERM (2026-10-18 KDE-menu reboot, cron review
+    #175) — the probe ``scripts/systemd-failure-alert.py`` has used since 2026-09-22. Asked only
+    under systemd (the forensics' own test: an INVOCATION_ID, or PID 1 as parent); a missing or
+    failing ``systemctl`` reads as not stopping, the louder default.
+    """
+    if not (os.environ.get("INVOCATION_ID") or os.getppid() == 1):
+        return False
+    for cmd in (["systemctl", "is-system-running"], ["systemctl", "--user", "is-system-running"]):
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False).stdout
+        except Exception:
+            continue
+        if (out or "").strip() == "stopping":
+            return True
+    return False
 
 
 def _send_failed(result: Any) -> bool:
@@ -1108,6 +1130,15 @@ class GatewayShutdownMixin:
             if drain_notification_suppressed():
                 logger.info(
                     "Home-channel shutdown broadcast suppressed by drain marker (suppress_notification=true)"
+                )
+                return
+        # A reboot or poweroff stops every user unit, so the broadcast would only tell the operator what
+        # they just did (2026-10-18 KDE-menu reboot, phone message #660 — cron review #175). Per-session
+        # pings above stay, as under a quiet drain. A failing or slow probe fails toward the broadcast.
+        with _log_suppressed(logging.DEBUG, "service-manager-stopping check failed: %s"):
+            if await asyncio.wait_for(asyncio.to_thread(_service_manager_stopping), timeout=6.0):
+                logger.info(
+                    "Home-channel shutdown broadcast suppressed: the system or user service manager is stopping"
                 )
                 return
         # EVERY served profile's home channel, through that profile's OWN bot: ``self.adapters`` and
