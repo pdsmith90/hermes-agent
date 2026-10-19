@@ -929,7 +929,8 @@ class TestExternalSkillMutations:
 
     def test_background_review_improves_any_skill_but_deletes_only_managed_ones(self, tmp_path):
         """#134289: the review fork improves every skill it learns from (user-owned with no usage
-        record, pinned, bundled, hub-installed), while delete keeps the ownership/pin guard."""
+        record, bundled, hub-installed), while delete keeps the ownership/pin guard. Pinned skills
+        stay read-only to the review fork on this fork: see the test below."""
         from tools.skill_manager_guards import mark_background_review_skill_read
         from tools.skill_provenance import (
             BACKGROUND_REVIEW,
@@ -939,7 +940,7 @@ class TestExternalSkillMutations:
 
         with _skill_dir(tmp_path), \
              patch("tools.skill_usage.load_usage", return_value={}), \
-             patch("tools.skill_usage.get_record", return_value={"pinned": True}), \
+             patch("tools.skill_usage.get_record", return_value={"pinned": False}), \
              patch("tools.skill_usage.is_bundled", return_value=True), \
              patch("tools.skill_usage.is_hub_installed", return_value=True):
             _create_skill("my-skill", VALID_SKILL_CONTENT)
@@ -963,6 +964,51 @@ class TestExternalSkillMutations:
         assert deleted["success"] is False
         assert "Refusing background curator delete" in deleted["error"]
         assert (tmp_path / "my-skill" / "SKILL.md").exists()
+
+    def test_background_review_cannot_write_a_pinned_skill(self, tmp_path):
+        """Fork policy: a pin keeps the review fork out of a skill's content, not only its
+        deletion. Every write action is refused on a pinned skill, while a foreground patch of
+        the same skill still goes through (only autonomous maintenance is kept out)."""
+        from tools.skill_manager_guards import mark_background_review_skill_read
+        from tools.skill_provenance import (
+            BACKGROUND_REVIEW,
+            reset_current_write_origin,
+            set_current_write_origin,
+        )
+
+        with _skill_dir(tmp_path), \
+             patch("tools.skill_usage.load_usage", return_value={}), \
+             patch("tools.skill_usage.get_record", return_value={"pinned": True}):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            (tmp_path / "my-skill" / "references").mkdir()
+            (tmp_path / "my-skill" / "references" / "old.md").write_text("# Old\n", encoding="utf-8")
+            token = set_current_write_origin(BACKGROUND_REVIEW)
+            try:
+                mark_background_review_skill_read(tmp_path / "my-skill" / "SKILL.md")
+                mark_background_review_skill_read(tmp_path / "my-skill" / "references" / "old.md")
+                refused = {
+                    "patch": skill_manage(action="patch", name="my-skill",
+                                          old_string="Do the thing.", new_string="Do the new thing."),
+                    "edit": skill_manage(action="edit", name="my-skill", content=VALID_SKILL_CONTENT_2),
+                    "write_file": skill_manage(action="write_file", name="my-skill",
+                                               file_path="references/lesson.md", file_content="# Lesson\n"),
+                    "remove_file": skill_manage(action="remove_file", name="my-skill",
+                                                file_path="references/old.md"),
+                }
+            finally:
+                reset_current_write_origin(token)
+            foreground = json.loads(skill_manage(
+                action="patch", name="my-skill",
+                old_string="Do the thing.", new_string="Do the foreground thing."))
+
+        for action, raw in refused.items():
+            result = json.loads(raw)
+            assert result["success"] is False, (action, result)
+            assert "pinned skills are off-limits" in result["error"], (action, result)
+        assert not (tmp_path / "my-skill" / "references" / "lesson.md").exists()
+        assert (tmp_path / "my-skill" / "references" / "old.md").exists()
+        assert foreground["success"] is True, foreground
+        assert "Do the foreground thing." in (tmp_path / "my-skill" / "SKILL.md").read_text(encoding="utf-8")
 
 
     def test_background_review_fails_closed_when_ownership_lookup_errors(self, tmp_path):

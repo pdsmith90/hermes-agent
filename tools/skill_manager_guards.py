@@ -208,6 +208,21 @@ def _background_review_delete_guard(name: str, skill_dir: Path) -> Optional[dict
     return None
 
 
+def _background_review_pinned_write_guard(name: str, action: str) -> Optional[dict[str, Any]]:
+    """Refuse the review fork's content writes to a pinned skill (this fork's policy).
+
+    Upstream #134289 lets the review fork improve any skill, pinned ones included. Here a pin is
+    how the operator keeps autonomous maintenance out of a skill, so a pinned skill stays read-only
+    to the fork; unpinned skills of any origin keep upstream's policy. Best-effort like
+    ``_pinned_guard``: an unreadable sidecar lets the write through."""
+    if not _is_background_review() or not _is_pinned(name, "pinned write guard"):
+        return None
+    return _refusal(
+        f"Refusing background curator {action} for pinned skill '{name}': pinned skills are "
+        f"off-limits to autonomous maintenance, content updates included. Only the user, in a "
+        f"foreground session, can change it.")
+
+
 def _background_review_read_before_write_guard(
     name: str, target: Path, action: str, file_label: str) -> Optional[dict[str, Any]]:
     """Require review forks to load the exact target before mutating it."""
