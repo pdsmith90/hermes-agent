@@ -243,7 +243,7 @@ class TestEscapedExceptionPath:
         args, _kw = run_env["marked"][0]
         assert args[1] is False and "cannot import name X" in args[2]
 
-    def test_prompt_scanner_block_uses_saved_failure_report_path(self, run_env, monkeypatch):
+    def test_prompt_scanner_block_uses_saved_failure_report_path(self, run_env, monkeypatch, cron_owner):
         """A scanner exception from a reloaded module must be converted to a normal blocked run.
 
         Otherwise the outer crash handler sends a generic alert without saving the blocked-run

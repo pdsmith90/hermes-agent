@@ -68,7 +68,8 @@ async def test_gateway_titles_original_request_without_changing_model_input(tmp_
     title_inputs, title_requests, model_inputs = [], [], []
 
     def title_request(**kwargs):
-        title_requests.append(kwargs["messages"][-1]["content"])
+        # Fork: title_generator appends Qwen's "/no_think" soft switch to the title request.
+        title_requests.append(kwargs["messages"][-1]["content"].removesuffix("\n\n/no_think"))
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"title": "Diagnose connection pool exhaustion"}'))])
 
     def title_at_turn_start(db, sid, text, **kwargs):

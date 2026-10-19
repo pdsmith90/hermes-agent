@@ -736,7 +736,7 @@ class TestRunJobSessionPersistence:
             "enabled_toolsets": ["memory", "file"],
         }
         with self._run_job_patches(tmp_path) as (fake_db, mock_agent_cls):
-            run_job(job)
+            _run_owned_job(job, tmp_path, fake_db)
 
         kwargs = mock_agent_cls.call_args.kwargs
         assert kwargs["skip_memory"] is True

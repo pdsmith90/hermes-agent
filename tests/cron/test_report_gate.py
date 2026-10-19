@@ -21,9 +21,9 @@ from cron.scheduler import (
     _morning_briefing_manifest,
     _report_gate_missing_marker,
     _strip_report_preamble,
-    run_job,
     run_one_job as sched_run_one_job,
 )
+from tests.cron.test_scheduler import _run_owned_job
 
 
 def _manifest_prompt(manifest):
@@ -530,7 +530,7 @@ def _run(tmp_path, job, responses):
         agent = MagicMock()
         agent.run_conversation.side_effect = list(responses)
         mock_agent_cls.return_value = agent
-        return run_job(job), agent
+        return _run_owned_job(job, tmp_path, fake_db), agent
 
 
 FIRST_MESSAGES = [
@@ -703,12 +703,12 @@ class TestRunJobReportGate:
 class TestDeliveryStripsPreamble:
     """run_one_job delivers the report from its header down; the file keeps it all."""
 
-    def test_delivery_gets_the_trimmed_report_and_the_file_keeps_the_narration(self, tmp_path):
+    def test_delivery_gets_the_trimmed_report_and_the_file_keeps_the_narration(self, tmp_path, cron_owner):
         import cron.jobs as cron_jobs
 
         job = {
             "id": "strip-test", "name": "experiment-design", "prompt": "design experiments",
-            "enabled": True, "state": "scheduled", "deliver": "local", "model": None,
+            "enabled": True, "state": "scheduled", "deliver": "telegram", "model": None,
             "provider": None, "provider_snapshot": "custom", "base_url": None,
             "schedule": {"kind": "interval", "minutes": 5, "display": "every 5m"},
             "report_marker": "Experiment design",
@@ -720,6 +720,11 @@ class TestDeliveryStripsPreamble:
             deliveries.append(content)
             return None
 
+        # A canonical fire sends through the durable delivery queue; capture both paths.
+        def fake_enqueue(execution_id, job, content, for_failure=False):
+            deliveries.append(content)
+            return {"status": "queued"}
+
         with cron_jobs.use_cron_store(tmp_path):
             cron_jobs.save_jobs([job])
             fresh = [j for j in cron_jobs.load_jobs() if j["id"] == job["id"]][0]
@@ -727,11 +732,12 @@ class TestDeliveryStripsPreamble:
                  patch("cron.scheduler_delivery._resolve_origin", return_value=None), \
                  patch("hermes_cli.env_loader.load_hermes_dotenv"), \
                  patch("hermes_cli.env_loader.reset_secret_source_cache"), \
-                 patch("hermes_state_registry.acquire", return_value=MagicMock()), \
-                 patch("tools.mcp_tool.discover_mcp_tools", return_value=[]), \
+                 patch("tools.mcp_tool_discovery.discover_mcp_tools", return_value=[]), \
                  patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                        return_value=_PROVIDER), \
                  patch("cron.scheduler._deliver_result", side_effect=fake_deliver), \
+                 patch("cron.delivery_queue.enqueue", side_effect=fake_enqueue), \
+                 patch("cron.scheduler._preflight_job_config", return_value=None), \
                  patch("cron.scheduler.save_job_output", wraps=lambda jid, out: saved.append(out)), \
                  patch("run_agent.AIAgent") as mock_agent_cls:
                 saved = []

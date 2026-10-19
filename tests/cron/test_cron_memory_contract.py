@@ -133,6 +133,6 @@ class TestCronMemoryContractOff:
             "skip_memory": True,  # not a supported job field; must be ignored
         }
         with _run_job_patches(tmp_path) as (_db, agent_cls):
-            run_job(job)
+            _run_owned_job(job, tmp_path, _db)
         kwargs = agent_cls.call_args.kwargs
         assert kwargs["skip_memory"] is True  # fork: always True, never read from the job
