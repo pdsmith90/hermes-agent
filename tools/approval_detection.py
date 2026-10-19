@@ -311,6 +311,11 @@ DANGEROUS_PATTERNS = [
     # Shell -c is parsed structurally by _execution_flag_findings(); a regex searching a dash-token
     # for "c" also matched --norc/--rcfile/--restricted.
     (rf'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:{_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
+    # Fork: the same into an interpreter that reads its program from stdin (no script, -c or -m
+    # argument; those read stdin as data or are caught by the -c/-e rules). Upstream removed the
+    # tirith scanner (911da42e9e), the only layer that caught `curl URL | python3`.
+    (r'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:python[23]?(?:\.\d+)?|node|nodejs|deno|bun|perl|ruby|php|julia|lua)'
+     r'(?:\s+-[\w-]*)*(?:\s*$|\s*[;&)]|\s+\|)', "pipe remote content to an interpreter"),
     (rf'\b(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     # eval/source/. $(curl ...) — equivalent to piping remote content to a shell.
     (r'(?:\beval\b|\bsource\b|\.)\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
