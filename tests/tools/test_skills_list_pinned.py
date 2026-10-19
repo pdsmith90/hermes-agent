@@ -1,7 +1,7 @@
 """``skills_list`` must report which skills are pinned.
 
 The background review fork is instructed that pinned skills are off-limits to
-autonomous maintenance, and ``_background_review_pinned_write_guard`` enforces that.
+autonomous maintenance, and ``_background_review_protected_write_guard`` enforces that.
 But ``skills_list`` returned only name/description/category, so the fork had no
 way to tell which of the skills it could see were pinned. It kept selecting the
 most relevant skill — which for a cron session is always one of the pinned ones
@@ -52,10 +52,10 @@ def _by_name(payload):
 LOCKED = "locked-skill"
 OPEN = "open-skill"
 
-# The distinctive phrase from the pin refusal of _background_review_pinned_write_guard;
+# The distinctive phrase from the pin branch of _background_review_protected_write_guard;
 # its other branches (not curator-managed, external dir, protected builtin)
 # refuse for different reasons and must not be conflated with a pin.
-PIN_REFUSAL = "pinned skills are off-limits"
+PIN_REFUSAL = "it is pinned"
 
 
 def test_pinned_skill_is_flagged(skills_home):
@@ -78,7 +78,7 @@ def test_unpinned_skill_carries_no_flag(skills_home):
 
 def test_flag_matches_the_write_guard_decision(skills_home, monkeypatch):
     """The reported flag must predict whether a background write is refused."""
-    from tools.skill_manager_tool import _background_review_pinned_write_guard
+    from tools.skill_manager_tool import _background_review_protected_write_guard
 
     _make_skill(skills_home, LOCKED)
     _make_skill(skills_home, OPEN)
@@ -94,7 +94,7 @@ def test_flag_matches_the_write_guard_decision(skills_home, monkeypatch):
     skills = _by_name(skills_list())
     assert set(skills) == {LOCKED, OPEN}
     for name, entry in skills.items():
-        refusal = _background_review_pinned_write_guard(name, "patch")
+        refusal = _background_review_protected_write_guard(name, skills_home / name, "patch")
         refused_for_pin = bool(refusal) and PIN_REFUSAL in refusal.get("error", "")
         assert entry.get("pinned", False) == refused_for_pin, (
             f"{name}: skills_list says pinned={entry.get('pinned', False)} but "
@@ -103,7 +103,7 @@ def test_flag_matches_the_write_guard_decision(skills_home, monkeypatch):
 
     # And the unpinned one must genuinely be writable, not merely refused for
     # some other reason — otherwise the agreement above is vacuous.
-    assert _background_review_pinned_write_guard(OPEN, "patch") is None
+    assert _background_review_protected_write_guard(OPEN, skills_home / OPEN, "patch") is None
 
 
 def test_hint_mentions_pinned_when_any_are_pinned(skills_home):
@@ -174,7 +174,7 @@ def test_skill_view_omits_the_flag_when_unpinned(skills_home):
 
 def test_skill_view_flag_matches_the_write_guard(skills_home, monkeypatch):
     """Same invariant as skills_list: shown state must predict guard behaviour."""
-    from tools.skill_manager_tool import _background_review_pinned_write_guard
+    from tools.skill_manager_tool import _background_review_protected_write_guard
 
     _make_skill(skills_home, LOCKED)
     _make_skill(skills_home, OPEN)
@@ -186,14 +186,14 @@ def test_skill_view_flag_matches_the_write_guard(skills_home, monkeypatch):
 
     for name in (LOCKED, OPEN):
         viewed = json.loads(skill_view(name))
-        refusal = _background_review_pinned_write_guard(name, "patch")
+        refusal = _background_review_protected_write_guard(name, skills_home / name, "patch")
         refused_for_pin = bool(refusal) and PIN_REFUSAL in refusal.get("error", "")
         assert viewed.get("pinned", False) == refused_for_pin, (
             f"{name}: skill_view says pinned={viewed.get('pinned', False)} but "
             f"the guard {'refuses' if refused_for_pin else 'allows'} a patch"
         )
 
-    assert _background_review_pinned_write_guard(OPEN, "patch") is None
+    assert _background_review_protected_write_guard(OPEN, skills_home / OPEN, "patch") is None
 
 
 def test_skill_view_and_skills_list_agree(skills_home):

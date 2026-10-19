@@ -208,19 +208,52 @@ def _background_review_delete_guard(name: str, skill_dir: Path) -> Optional[dict
     return None
 
 
-def _background_review_pinned_write_guard(name: str, action: str) -> Optional[dict[str, Any]]:
-    """Refuse the review fork's content writes to a pinned skill (this fork's policy).
+def _background_review_protection(name: str, skill_dir: Path) -> Optional[str]:
+    """Why the review fork may not write *name* directly, or None when it may (this fork's policy).
 
-    Upstream #134289 lets the review fork improve any skill, pinned ones included. Here a pin is
-    how the operator keeps autonomous maintenance out of a skill, so a pinned skill stays read-only
-    to the fork; unpinned skills of any origin keep upstream's policy. Best-effort like
-    ``_pinned_guard``: an unreadable sidecar lets the write through."""
-    if not _is_background_review() or not _is_pinned(name, "pinned write guard"):
+    The review fork writes directly only to skills it created itself (curator-managed) that are
+    not pinned. Pinned, external, built-in, hub, bundled and user-owned skills are protected: its
+    writes to them are staged for the user's approval (``_stage_review_write_to_protected``).
+    Upstream #134289 opened every skill to the review fork; here pins mark the skills the operator
+    keeps out of autonomous maintenance, and an ownership check also covers skills nobody pinned.
+    Checked under the resolved directory name too: a ``category/name`` or frontmatter alias carries
+    its own usage record, which says nothing about the pin or the owner."""
+    names = list(dict.fromkeys([name, skill_dir.name]))
+    if any(_is_pinned(n, "protected skill check") for n in names):
+        return "pinned"
+    try:
+        from agent.skill_utils import is_external_skill_path
+        if is_external_skill_path(skill_dir):
+            return "in skills.external_dirs"
+    except Exception:
+        logger.debug("external skill check failed for %s", name, exc_info=True)
+    try:
+        from tools import skill_usage
+        for predicate, label in (
+            (skill_usage.is_protected_builtin, "a protected built-in"),
+            (skill_usage.is_hub_installed, "hub-installed"),
+            (skill_usage.is_bundled, "bundled")):
+            if any(predicate(n) for n in names):
+                return label
+        if not skill_usage._is_curator_managed_record(skill_usage.load_usage().get(skill_dir.name)):
+            return "not curator-managed (user-owned)"
+    except Exception:
+        logger.warning("protected skill check failed for %s", name, exc_info=True)
+        return "of unverifiable provenance"
+    return None
+
+
+def _background_review_protected_write_guard(
+        name: str, skill_dir: Path, action: str) -> Optional[dict[str, Any]]:
+    """Backstop: refuse a review-fork content write that reached a protected skill unstaged."""
+    if not _is_background_review():
+        return None
+    reason = _background_review_protection(name, skill_dir)
+    if reason is None:
         return None
     return _refusal(
-        f"Refusing background curator {action} for pinned skill '{name}': pinned skills are "
-        f"off-limits to autonomous maintenance, content updates included. Only the user, in a "
-        f"foreground session, can change it.")
+        f"Refusing background curator {action} for skill '{name}': it is {reason}, so background "
+        f"review writes to it are staged for the user's approval, never applied directly.")
 
 
 def _background_review_read_before_write_guard(

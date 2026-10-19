@@ -28,8 +28,8 @@ from agent.skill_utils import (
     parse_frontmatter as _parse_frontmatter,
     SKILL_PROMPT_DESC_LIMIT)
 from tools.skill_manager_guards import (
-    _background_review_delete_guard, _background_review_pinned_write_guard, _background_review_preflight,
-    _background_review_read_before_write_guard,
+    _background_review_delete_guard, _background_review_preflight, _background_review_protected_write_guard,
+    _background_review_protection, _background_review_read_before_write_guard,
     _containing_skills_root, _curator_consolidation_delete_guard, _is_path_redirect, _pinned_guard,
     _validate_delete_target, _is_background_review, _refusal as _err)
 from tools.skill_manager_batch import (
@@ -383,14 +383,18 @@ def _resolve_supporting_file(skill_dir: Path, file_path: str):
 
 
 def _locate_for_write(name: str, action: str, not_found_suffix: str = ""):
-    """Find the skill; a delete also runs the background-review delete guard, any other write the
-    pinned-write guard -> ``(skill_dir, None)`` | ``(None, error_dict)``."""
+    """Find the skill; a delete also runs the background-review delete guard (under the resolved
+    directory name too), any other write the protected-write backstop -> ``(skill_dir, None)`` |
+    ``(None, error_dict)``."""
     existing = _find_skill(name)
     if not existing:
         return None, _err(_skill_not_found_error(name, not_found_suffix))
     skill_dir = existing["path"]
-    guard = (_background_review_delete_guard(name, skill_dir) if action == "delete"
-             else _background_review_pinned_write_guard(name, action))
+    if action == "delete":
+        guard = _background_review_delete_guard(name, skill_dir) or (
+            _background_review_delete_guard(skill_dir.name, skill_dir) if skill_dir.name != name else None)
+    else:
+        guard = _background_review_protected_write_guard(name, skill_dir, action)
     return (None, guard) if guard else (skill_dir, None)
 
 
@@ -675,6 +679,38 @@ def _run_write_gate(build_staging):
                        "gist": gist, "message": decision.message}, ensure_ascii=False)
 
 
+_REVIEW_CONTENT_WRITES = frozenset({"edit", "patch", "write_file", "remove_file"})
+
+
+def _stage_review_write_to_protected(targets, build_staging) -> Optional[str]:
+    """Stage the review fork's write when it touches a protected skill (this fork's policy).
+
+    ``targets`` = ``[(action, name), ...]`` the call would apply. For the review fork (not an
+    approved replay), a content write to any protected skill (``_background_review_protection``)
+    stages the WHOLE call in the skills pending queue (``/skills pending``, ``/skills diff <id>``,
+    ``/skills approve <id>``) whatever skills.write_approval says. ``build_staging(wa)`` is the
+    write gate's ``(payload, gist)`` builder. None = proceed."""
+    if _skill_gate_bypass.get() or not _is_background_review():
+        return None
+    protected = []
+    for action, name in targets:
+        existing = _find_skill(name) if action in _REVIEW_CONTENT_WRITES else None
+        reason = _background_review_protection(name, existing["path"]) if existing else None
+        if reason:
+            protected.append(f"'{name}' is {reason}")
+    if not protected:
+        return None
+    from tools import write_approval as wa
+    payload, gist = build_staging(wa)
+    record = wa.stage_write(wa.SKILLS, payload, summary=gist, origin=wa.current_origin())
+    return json.dumps({
+        "success": True, "staged": True, "pending_id": record["id"], "gist": gist,
+        "message": (f"Staged for the user's approval, not applied ({'; '.join(protected)}): background "
+                    "review writes to a skill it did not create, or to a pinned one, wait for the user. "
+                    "Do not retry it or move the lesson to another skill."),
+    }, ensure_ascii=False)
+
+
 def _apply_skill_write_gate(action, name, **payload_kwargs):
     """Flat-shape gate: stage the full kwargs so approval can replay them; bypassed during replay."""
     if action not in _ACTION_HANDLERS or _skill_gate_bypass.get():
@@ -784,6 +820,12 @@ def skill_manage(
     args = dict(content=content, category=category, file_path=file_path, file_content=file_content,
                 old_string=old_string, new_string=new_string, replace_all=replace_all,
                 absorbed_into=absorbed_into)
+    def _review_staging(wa):
+        payload = {"action": action, "name": name, **{k: v for k, v in args.items() if v is not None}}
+        gist_kw = {k: args.get(k) or "" for k in ("content", "file_path", "old_string", "new_string")}
+        return payload, wa.skill_gist(action, name, **gist_kw)
+    if (staged := _stage_review_write_to_protected([(action, name)], _review_staging)) is not None:
+        return staged
     if (gate_result := _apply_skill_write_gate(action, name, **args)) is not None:
         return gate_result
     if (shape_err := _op_shape_error(action, args)) is not None:

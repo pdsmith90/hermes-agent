@@ -334,7 +334,7 @@ def skills_list(category: str | None = None, task_id: str | None = None) -> str:
         if pinned_count:
             hint += (
                 f". {pinned_count} skill(s) marked \"pinned\": true — autonomous background maintenance "
-                "cannot write to those; only the user, in a foreground session, can change them"
+                "cannot change those directly: its writes are staged for the user's approval"
             )
         return _json({
             "success": True, "skills": all_skills, "categories": categories,
@@ -717,10 +717,9 @@ def skill_view(
             if skill_usage.get_record(skill_name).get("pinned"):
                 result["pinned"] = True
                 result["pinned_note"] = (
-                    f"'{skill_name}' is PINNED. Autonomous background maintenance cannot write to it — "
-                    "patch and edit are refused, not just delete. Do not compose a patch for this skill; "
-                    "pick an unpinned one or report the needed change instead. Only the user, in a "
-                    "foreground session, can change it."
+                    f"'{skill_name}' is PINNED. Autonomous background maintenance cannot change it "
+                    "directly: a patch or edit is staged for the user's approval, and delete is refused. "
+                    "Only the user, in a foreground session, changes it directly."
                 )
         except Exception:
             logger.debug("pinned annotation failed for skill_view(%s)", skill_name, exc_info=True)

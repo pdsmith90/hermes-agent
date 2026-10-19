@@ -928,9 +928,9 @@ class TestExternalSkillMutations:
 
 
     def test_background_review_improves_any_skill_but_deletes_only_managed_ones(self, tmp_path):
-        """#134289: the review fork improves every skill it learns from (user-owned with no usage
-        record, bundled, hub-installed), while delete keeps the ownership/pin guard. Pinned skills
-        stay read-only to the review fork on this fork: see the test below."""
+        """#134289 upstream lets the review fork improve every skill it learns from. This fork stages
+        those writes instead (user-owned with no usage record, pinned, bundled, hub-installed): they
+        land only on the user's approval, while delete keeps the ownership/pin guard."""
         from tools.skill_manager_guards import mark_background_review_skill_read
         from tools.skill_provenance import (
             BACKGROUND_REVIEW,
@@ -940,7 +940,7 @@ class TestExternalSkillMutations:
 
         with _skill_dir(tmp_path), \
              patch("tools.skill_usage.load_usage", return_value={}), \
-             patch("tools.skill_usage.get_record", return_value={"pinned": False}), \
+             patch("tools.skill_usage.get_record", return_value={"pinned": True}), \
              patch("tools.skill_usage.is_bundled", return_value=True), \
              patch("tools.skill_usage.is_hub_installed", return_value=True):
             _create_skill("my-skill", VALID_SKILL_CONTENT)
@@ -958,23 +958,33 @@ class TestExternalSkillMutations:
             finally:
                 reset_current_write_origin(token)
 
-        assert patched["success"] is True, patched
-        assert written["success"] is True, written
-        assert "Do the new thing." in (tmp_path / "my-skill" / "SKILL.md").read_text(encoding="utf-8")
+        assert patched["success"] is True and patched.get("staged") is True, patched
+        assert written["success"] is True and written.get("staged") is True, written
+        assert "Do the new thing." not in (tmp_path / "my-skill" / "SKILL.md").read_text(encoding="utf-8")
+        assert not (tmp_path / "my-skill" / "references" / "lesson.md").exists()
         assert deleted["success"] is False
         assert "Refusing background curator delete" in deleted["error"]
         assert (tmp_path / "my-skill" / "SKILL.md").exists()
 
-    def test_background_review_cannot_write_a_pinned_skill(self, tmp_path):
-        """Fork policy: a pin keeps the review fork out of a skill's content, not only its
-        deletion. Every write action is refused on a pinned skill, while a foreground patch of
-        the same skill still goes through (only autonomous maintenance is kept out)."""
-        from tools.skill_manager_guards import mark_background_review_skill_read
+    @staticmethod
+    def _as_review(fn):
         from tools.skill_provenance import (
             BACKGROUND_REVIEW,
             reset_current_write_origin,
             set_current_write_origin,
         )
+        token = set_current_write_origin(BACKGROUND_REVIEW)
+        try:
+            return fn()
+        finally:
+            reset_current_write_origin(token)
+
+    def test_background_review_stages_every_write_to_a_protected_skill(self, tmp_path):
+        """Fork policy: the review fork's content writes to a skill it did not create (here pinned
+        and user-owned) are staged for approval, one pending record per call; nothing is written,
+        and a foreground patch of the same skill still applies directly."""
+        from tools import write_approval as wa
+        from tools.skill_manager_guards import mark_background_review_skill_read
 
         with _skill_dir(tmp_path), \
              patch("tools.skill_usage.load_usage", return_value={}), \
@@ -982,34 +992,95 @@ class TestExternalSkillMutations:
             _create_skill("my-skill", VALID_SKILL_CONTENT)
             (tmp_path / "my-skill" / "references").mkdir()
             (tmp_path / "my-skill" / "references" / "old.md").write_text("# Old\n", encoding="utf-8")
-            token = set_current_write_origin(BACKGROUND_REVIEW)
-            try:
-                mark_background_review_skill_read(tmp_path / "my-skill" / "SKILL.md")
-                mark_background_review_skill_read(tmp_path / "my-skill" / "references" / "old.md")
-                refused = {
-                    "patch": skill_manage(action="patch", name="my-skill",
-                                          old_string="Do the thing.", new_string="Do the new thing."),
-                    "edit": skill_manage(action="edit", name="my-skill", content=VALID_SKILL_CONTENT_2),
-                    "write_file": skill_manage(action="write_file", name="my-skill",
-                                               file_path="references/lesson.md", file_content="# Lesson\n"),
-                    "remove_file": skill_manage(action="remove_file", name="my-skill",
-                                                file_path="references/old.md"),
-                }
-            finally:
-                reset_current_write_origin(token)
+            before = len(wa.list_pending(wa.SKILLS))
+            mark_background_review_skill_read(tmp_path / "my-skill" / "SKILL.md")
+            mark_background_review_skill_read(tmp_path / "my-skill" / "references" / "old.md")
+            calls = {
+                "patch": dict(action="patch", name="my-skill",
+                              old_string="Do the thing.", new_string="Do the new thing."),
+                "edit": dict(action="edit", name="my-skill", content=VALID_SKILL_CONTENT_2),
+                "write_file": dict(action="write_file", name="my-skill",
+                                   file_path="references/lesson.md", file_content="# Lesson\n"),
+                "remove_file": dict(action="remove_file", name="my-skill", file_path="references/old.md"),
+            }
+            staged = {k: json.loads(self._as_review(lambda kw=kw: skill_manage(**kw)))
+                      for k, kw in calls.items()}
+            pending = wa.list_pending(wa.SKILLS)
             foreground = json.loads(skill_manage(
                 action="patch", name="my-skill",
                 old_string="Do the thing.", new_string="Do the foreground thing."))
 
-        for action, raw in refused.items():
-            result = json.loads(raw)
-            assert result["success"] is False, (action, result)
-            assert "pinned skills are off-limits" in result["error"], (action, result)
+        for action, result in staged.items():
+            assert result["success"] is True and result.get("staged") is True, (action, result)
+            assert "'my-skill' is pinned" in result["message"], (action, result)
+        assert len(pending) - before == 4
+        assert {r["origin"] for r in pending[-4:]} == {"background_review"}
         assert not (tmp_path / "my-skill" / "references" / "lesson.md").exists()
         assert (tmp_path / "my-skill" / "references" / "old.md").exists()
         assert foreground["success"] is True, foreground
         assert "Do the foreground thing." in (tmp_path / "my-skill" / "SKILL.md").read_text(encoding="utf-8")
 
+    def test_background_review_writes_its_own_unpinned_skill_directly(self, tmp_path):
+        from tools.skill_manager_guards import mark_background_review_skill_read
+
+        with _skill_dir(tmp_path), \
+             patch("tools.skill_usage.load_usage", return_value={"own-skill": {"created_by": "agent"}}), \
+             patch("tools.skill_usage.get_record", return_value={"created_by": "agent", "pinned": False}):
+            _create_skill("own-skill", VALID_SKILL_CONTENT)
+
+            def review_patch():
+                mark_background_review_skill_read(tmp_path / "own-skill" / "SKILL.md")
+                return skill_manage(action="patch", name="own-skill",
+                                    old_string="Do the thing.", new_string="Do the new thing.")
+            result = json.loads(self._as_review(review_patch))
+
+        assert result["success"] is True and "staged" not in result, result
+        assert "Do the new thing." in (tmp_path / "own-skill" / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_a_category_alias_cannot_slip_past_the_pin(self, tmp_path):
+        """``category/name`` resolves to the same skill but carries its own (unpinned, even agent-
+        created) usage record; the check runs under the resolved directory name too."""
+        from tools.skill_manager_guards import mark_background_review_skill_read
+
+        def record(name):
+            return {"pinned": True} if name == "pinned-one" else {"created_by": "agent", "pinned": False}
+
+        with _skill_dir(tmp_path), \
+             patch("tools.skill_usage.load_usage", return_value={"mlops/pinned-one": {"created_by": "agent"}}), \
+             patch("tools.skill_usage.get_record", side_effect=record):
+            _create_skill("pinned-one", VALID_SKILL_CONTENT, category="mlops")
+            skill_md = tmp_path / "mlops" / "pinned-one" / "SKILL.md"
+            mark_background_review_skill_read(skill_md)
+            result = json.loads(self._as_review(lambda: skill_manage(
+                action="patch", name="mlops/pinned-one",
+                old_string="Do the thing.", new_string="Do the alias thing.")))
+
+        assert result.get("staged") is True, result
+        assert "Do the alias thing." not in skill_md.read_text(encoding="utf-8")
+
+    def test_a_staged_batch_is_one_pending_record_and_approval_applies_it(self, tmp_path):
+        from tools import write_approval as wa
+        from tools.skill_manager_guards import mark_background_review_skill_read
+        from tools.skill_manager_tool import apply_skill_pending
+
+        with _skill_dir(tmp_path), \
+             patch("tools.skill_usage.load_usage", return_value={}), \
+             patch("tools.skill_usage.get_record", return_value={"pinned": False}):
+            _create_skill("user-skill", VALID_SKILL_CONTENT)
+            before = len(wa.list_pending(wa.SKILLS))
+            mark_background_review_skill_read(tmp_path / "user-skill" / "SKILL.md")
+            result = json.loads(self._as_review(lambda: skill_manage(action="", name="", operations=[
+                {"action": "patch", "name": "user-skill",
+                 "old_string": "Do the thing.", "new_string": "Do the approved thing."}])))
+            pending = wa.list_pending(wa.SKILLS)
+            untouched = (tmp_path / "user-skill" / "SKILL.md").read_text(encoding="utf-8")
+            applied = json.loads(apply_skill_pending(pending[-1]["payload"]))
+
+        assert result.get("staged") is True and "not curator-managed" in result["message"], result
+        assert len(pending) - before == 1 and pending[-1]["payload"]["action"] == "batch"
+        assert "Do the approved thing." not in untouched
+        assert applied["success"] is True, applied
+        assert "Do the approved thing." in (tmp_path / "user-skill" / "SKILL.md").read_text(encoding="utf-8")
 
     def test_background_review_fails_closed_when_ownership_lookup_errors(self, tmp_path):
         from tools.skill_provenance import (
