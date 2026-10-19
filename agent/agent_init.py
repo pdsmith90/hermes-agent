@@ -1348,13 +1348,15 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform, memory_manager=None):
         # of being re-initialized (#120116). No initialize_all — the providers are already bound.
         # FORK: not gated on skip_memory — a handed-back manager is reused by every agent shape.
         agent._memory_manager = memory_manager
-    else:
-        # FORK — deliberately NOT gated on skip_memory. skip_memory exists so background
-        # and flush agents don't spin up the built-in MEMORY.md store (handled by
-        # the block above), but the external provider's tools — fact_store and
-        # fact_feedback — are exactly what a background/cron agent needs in order
-        # to write facts at all. Gating them here silently gives cron agents no
-        # memory tools.
+    elif not skip_memory or platform in ("cron", "subagent"):
+        # FORK — cron and subagent agents load the provider despite skip_memory. Here
+        # skip_memory keeps them off the built-in MEMORY.md store (handled by the block
+        # above), but the external provider's tools — fact_store and fact_feedback — are
+        # exactly what a cron agent needs in order to write facts at all; gating them on
+        # skip_memory silently gives cron agents no memory tools. Every other skip_memory
+        # agent (review fork, /refine and side agents, curator) keeps upstream's gate: a
+        # provider bound to the parent's session would ingest the review harness and is
+        # never shut down by release_clients().
         try:
             # Re-read from _agent_cfg rather than reusing mem_config: that name
             # is only bound inside the block above, which is still gated, so it
