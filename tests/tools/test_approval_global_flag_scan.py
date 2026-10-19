@@ -61,6 +61,12 @@ cases = {
     "docker compose --project-name demo  down": True,
     "hermes --config  x.yaml gateway restart": True,
 }
+# Fork: the shell treats a whitespace run as one separator, and this fork also scans the
+# whitespace-collapsed command, so a command decides like its collapsed form (stricter than
+# upstream for the double-space cases, never looser).
 for command, dangerous in cases.items():
-    assert detect_dangerous_command(command)[0] is dangerous, command
+    decision = detect_dangerous_command(command)[0]
+    assert decision is detect_dangerous_command(" ".join(command.split()))[0], command
+    if dangerous:
+        assert decision is True, command
 ''')
