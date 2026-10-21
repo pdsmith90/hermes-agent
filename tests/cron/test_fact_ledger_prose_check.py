@@ -123,6 +123,21 @@ class TestProseCheckPure:
         problems, _ = _prose_check(claim, [], [], [], [], [])
         assert len(problems) == 1 and ("3381" in problems[0] or "220" in problems[0])
 
+    @pytest.mark.parametrize("change", ["619→577 chars", "619→577 char truncation",
+                                        "context grew 4096 -> 8192 tokens", "coverage 61→57%"])
+    def test_a_size_or_percentage_change_is_not_an_id(self, change):
+        # 2026-10-21 daily-review and consolidate-synthesize quoting a fact_store repair log line
+        # ("619 chars -> 577"): "619→577 chars" was read as the claim "fid 619 →".
+        resp = f"Stored fid 3900. The log shows {change} for one call."
+        problems, _ = _prose_check(resp, _rows(3900), [], [], [], [])
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", ["promoted 3381 → memory-entry 3391", "fid 3517 → fid 3495",
+                                       "3381 → 3391 superseded", "fid 619 → 577 chars"])
+    def test_an_arrow_that_only_looks_like_a_unit_change_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(f"dream: {claim}.", [], [], [], [], [])
+        assert len(problems) == 1
+
     @pytest.mark.parametrize("claim", ["> 3274 → CONFIRMED", "research: 3274 → CONFIRMED (n = 12)"])
     def test_a_bare_id_after_a_blockquote_or_beside_a_value_is_still_a_claim(self, claim):
         problems, _ = _prose_check(claim, [], [], [], [], [])

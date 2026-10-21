@@ -535,9 +535,10 @@ def _strip_tool_call_tail(args: dict) -> None:
             continue
         cleaned = val[: m.start()].rstrip().rstrip(">").rstrip()
         logger.warning(
-            "fact_store: repaired tool-call tail in argument %r (%d chars -> %d); "
+            "fact_store: stripped %d chars of tool-call markup from argument %r "
+            "(value intact, %d chars kept); "
             "the serving layer did not terminate the parameter value",
-            key, len(val), len(cleaned),
+            len(val) - len(cleaned), key, len(cleaned),
         )
         args[key] = cleaned
 

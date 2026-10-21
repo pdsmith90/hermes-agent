@@ -169,8 +169,7 @@ class TelegramFallbackTransport(httpx.AsyncBaseTransport):
                         if self._sticky_ip is _UNSET or self._sticky_ip != ip:
                             self._sticky_ip = ip
                             if ip is not None:
-                                log = logger.warning if last_error is not None else logger.info
-                                log("[Telegram] Using sticky IPv4 Telegram API path %s (dual-stack hostname tried last — #87015)", ip)
+                                logger.info("[Telegram] Using sticky IPv4 Telegram API path %s (dual-stack hostname tried last — #87015)", ip)
                 return response
             except Exception as exc:
                 last_error = exc

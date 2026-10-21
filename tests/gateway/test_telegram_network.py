@@ -519,6 +519,29 @@ class TestFallbackLogLevels:
         )
 
     @pytest.mark.asyncio
+    async def test_sticky_repin_after_a_stale_path_emits_no_warning(self, monkeypatch, caplog):
+        calls = []
+        behavior = {
+            "api.telegram.org": "timeout",
+            "149.154.167.220": "ok",
+            "149.154.167.221": "ok",
+        }
+        monkeypatch.setattr(
+            tnet.httpx, "AsyncHTTPTransport", _fake_transport_factory(calls, behavior)
+        )
+        transport = tnet.TelegramFallbackTransport(["149.154.167.220", "149.154.167.221"])
+        await transport.handle_async_request(_telegram_request())
+        behavior["149.154.167.220"] = "timeout"
+
+        with caplog.at_level("INFO", logger=tnet.logger.name):
+            resp = await transport.handle_async_request(_telegram_request())
+
+        assert resp.status_code == 200
+        assert transport._sticky_ip == "149.154.167.221"
+        assert [r.levelname for r in caplog.records if "sticky IPv4" in r.getMessage()] == ["INFO"]
+        assert not [r for r in caplog.records if r.levelno >= 30]
+
+    @pytest.mark.asyncio
     async def test_exhausted_request_emits_exactly_one_warning(self, monkeypatch, caplog):
         """When every path fails the request fails too — that IS worth a warning,
         and it should be one line carrying all attempts, not one line each."""

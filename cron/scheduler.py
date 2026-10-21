@@ -3020,6 +3020,14 @@ _PROSE_AUTHOR_YEAR = re.compile(
 # runs, like a chain. fact_id is a fid token, not a setting: "fact_id 3381 → 3391" stays a claim.
 _PROSE_SETTING_CHANGE = re.compile(
     r"\b(?!fact_ids?\b)[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*:?\s+\d+\s*(?:→|->)\s*\d+", re.I)
+# "619→577 chars", "4096 -> 8192 tokens", "61→57%": a size or percentage change, not a write (2026-10-21
+# daily-review and consolidate-synthesize reading a fact_store repair log line). Blanked before the
+# arrow rule runs, like a chain. The lookahead after the unit keeps the bare "s" from swallowing a
+# verdict word ("3381 → 3391 superseded"); the lookbehinds keep "fid 619 → 577 chars" a claim.
+_PROSE_UNIT_CHANGE = re.compile(
+    r"(?<![\w./-])(?<!fid\s)(?<!fids\s)(?<!fid=)(?<!fact\s)"
+    r"\d{1,6}\s*(?:→|->)\s*\d{1,6}\s*"
+    r"(?:(?:chars?|characters?|tokens?|bytes?|lines?|ms|s|[KMG]i?B)(?![\w])|%)", re.I)
 # Jobs whose report is ABOUT other jobs' writes: their claim verbs name facts they never touched.
 _PROSE_CHECK_REPORTERS = frozenset({"morning-briefing"})
 
@@ -3057,8 +3065,8 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
     if job_name not in _PROSE_CHECK_REPORTERS:
         claimed = {}
         unquoted = _PROSE_QUOTED.sub('""', text)  # an empty quotation still stops a verb's gap
-        unchained = _PROSE_SETTING_CHANGE.sub(" ", _PROSE_AUTHOR_YEAR.sub(
-            " ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", unquoted))))
+        unchained = _PROSE_UNIT_CHANGE.sub(" ", _PROSE_SETTING_CHANGE.sub(" ", _PROSE_AUTHOR_YEAR.sub(
+            " ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", unquoted)))))
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
             for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else unquoted):
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
