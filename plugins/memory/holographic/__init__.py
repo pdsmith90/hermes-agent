@@ -628,11 +628,14 @@ class HolographicMemoryProvider(MemoryProvider):
                 "Use fact_store(action='add') to store durable structured facts about people, projects, preferences, decisions.\n"
                 "Use fact_feedback to rate facts after using them (trains trust scores)."
             )
+        # No live fact count here: it changed between nearly every session and,
+        # sitting near the end of the system prompt, broke the cross-session
+        # prompt-cache prefix (a full re-prefill on each cron job's first call).
         return (
-            f"# Holographic Memory\n"
-            f"Active. {total} facts stored with entity resolution and trust scoring.\n"
-            f"Use fact_store to search, probe entities, reason across entities, or add facts.\n"
-            f"Use fact_feedback to rate facts after using them (trains trust scores)."
+            "# Holographic Memory\n"
+            "Active. Facts are stored with entity resolution and trust scoring.\n"
+            "Use fact_store to search, probe entities, reason across entities, or add facts.\n"
+            "Use fact_feedback to rate facts after using them (trains trust scores)."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
