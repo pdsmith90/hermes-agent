@@ -3007,10 +3007,13 @@ _PROSE_ID_CHAIN = re.compile(
     rf"(?<![\w./-])(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}){{2,}}(?![\d.])", re.I)
 # "the audit pair (fid 3523 → fid 3524)", "superseded pairs (3125→3126, 3156→3157)": id pairs a
 # lineage word introduces name which fact superseded which (2026-10-11 consolidate, cron review #166).
+# Also matches bullet items under a lineage/superseded header (2026-10-20 consolidate, cron review #201).
 # Blanked before the arrow rule runs, like a chain; a bare "fid 3517 → fid 3495" merge stays a claim.
 _PROSE_PAIR = rf"(?:{_PROSE_FID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?![\d.])"
 _PROSE_LINEAGE_PAIRS = re.compile(
-    rf"\b(?:pairs?|supersed\w*|supersession|lineage)\b[^\d\n]{{0,25}}{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*", re.I)
+    rf"\b(?:pairs?|supersed\w*|supersession|lineage)\b(?:"
+    rf"[^\d\n]{{0,25}}{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*|"
+    rf"[^\n]*(?:\n\s*[-*]\s*[^\n]+)+)", re.I)
 # "Chao 2015 → Guo et al. 2019", "Vernotte 2015 → GRACE-FO": an author-year citation before an arrow
 # traces a lineage, not a write (2026-10-04 dream, 2026-10-09 doc-paper-ingest). Blanked before the
 # arrow rule runs, like a chain. A claim verb or a fid token in the author's place ("Promoted 1983 →",

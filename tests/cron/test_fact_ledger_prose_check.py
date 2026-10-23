@@ -96,6 +96,18 @@ class TestProseCheckPure:
         problems, _ = _prose_check(resp, _rows(3510), [], [], [], [])
         assert problems == []
 
+    def test_bulleted_pairs_under_superseded_header_are_not_claims(self):
+        # 2026-10-20 consolidate (cron review #201): bullet items under a superseded header
+        resp = """
+**STEP 4 — Duplicate merges:** Superseded chains already handled by store:
+- 3841 → 3843 → 3844 (pipeline gapfill flank, three-stage correction)
+- 3837 → 3839 (spline push status)
+
+**STEP 4b — Cluster synthesis:** Stored fid 3856.
+"""
+        problems, _ = _prose_check(resp, _rows(3856), [], [], [], [])
+        assert problems == []
+
     @pytest.mark.parametrize("claim", ["fid 3326 → 0.55", "3274 → CONFIRMED", "fid 3301 -> parked",
                                        "AGED fid=3511 -> attempted-once", "Duplicate merge: fid 3517 → fid 3495"])
     def test_an_arrow_into_a_status_or_trust_is_still_a_claim(self, claim):
