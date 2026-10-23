@@ -186,6 +186,10 @@ class TestProseCheckPure:
         # 2026-10-05 daily-review
         "**Lessons stored:** None new — fid 3257 (repeat_penalty fix) and fid 3252 (JSON parse) cover it",
         "removed nothing; fid 3631 stays",
+        # 2026-10-23 consolidate-synthesize: the negation sits right BEFORE the verb (cron review #198)
+        '- fid 3853 (3d, provider-health/Gemini attribution): no stored fact answers it; '
+        'fid 3832 confirms "not done" → left open.',
+        "never created fid 3833; not updated fid 3834",
     ])
     def test_a_verb_after_in_or_a_negated_verb_names_existing_facts(self, resp):
         problems, _ = _prose_check(resp, [], [], [], [], [])
@@ -195,6 +199,7 @@ class TestProseCheckPure:
         "bumped fid 3316 (shared-scratchpad lesson already stored)",  # 2026-10-06: a real phantom bump
         "stored facts 3740, 3741 from tonight's papers",
         "Fixed: stored fid 3740 in facts about GRACE",
+        "No duplicates; stored fid 3741",
     ])
     def test_a_plain_or_attributive_free_verb_is_still_a_claim(self, claim):
         problems, _ = _prose_check(claim, [], [], [], [], [])

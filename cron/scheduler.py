@@ -2967,8 +2967,11 @@ _PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
 # 3464" (2026-10-18 consolidate, cron review #173) names what 3472 was copied FROM, and the only write
 # to 3464 that night was another job's — unless the noun is a property of the fact itself ("bumped
 # trust of fid 3464" writes 3464).
+# A negation right before the verb denies it like one in the gap: "no stored fact answers it; fid 3832
+# confirms …" (2026-10-23 consolidate-synthesize, cron review #198) read 3832, not a write that night.
 _PROSE_CLAIM_BEFORE = re.compile(
-    rf"(?<!already[\s-])(?<!previously[\s-])(?<!\bin\s)\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
+    rf"(?<!already[\s-])(?<!previously[\s-])(?<!\bin\s)(?<!\bno\s)(?<!\bnot\s)(?<!\bnever\s)"
+    rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
     rf"(?!\s+(?!(?:trust|trust_score|content|category|tags?|validity|wording|text|body)\b)[a-z][a-z_-]*\s+of\b)"
     rf"(?:(?!\b(?:none|no|nothing|not)\b)[^.\n\"“”]){{0,25}}?"
     rf"{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})", re.I)
