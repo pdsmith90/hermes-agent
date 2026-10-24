@@ -224,6 +224,28 @@ def detect_hardline_command(command: str) -> tuple:
     return (False, None)
 
 
+# Fork (2026-10-23 review): what may stand between the pipe and the program that runs it.
+# `curl … | sudo bash`, `| env python3`, `| timeout 60 python3`, `|& python3`, `| (python3)` run the
+# remote text exactly as `| bash` / `| python3` do; the rules below missed every one of them once the
+# tirith scanner was gone. A wrapper may carry up to six option/value tokens (`sudo -u root -E`).
+# A closing paren ends a shell's name only after an opening one (`| (sh)`), so a grep alternation
+# such as "(curl|wget|sh)" is not a pipe; a pipe needs space before it after an interpreter for the
+# same reason ("(curl|python3|llama)", the 60-day cron replay's one false hit).
+_PIPE_WRAPPERS_RE = (r"(?:sudo|doas|env|nohup|nice|ionice|stdbuf|command|exec|time|timeout|setsid|"
+                     r"chronic|unbuffer|busybox)")
+_PIPE_INTO = rf"\|&?\s*(?P<sub>\(\s*)?(?:{_PIPE_WRAPPERS_RE}\b(?:\s+[^\s|;&()]+){{0,6}}?\s+)?(?:[/\w.-]*/)?"
+_PIPE_SHELLS_RE = rf"(?:{_SHELL_NAMES_RE}|fish|ash|mksh|csh|tcsh)"
+# Interpreters that execute a program read from stdin when given no script: no argument but options,
+# or `-` / `/dev/stdin` as the script (anything after it is the program's argv).
+_PIPE_INTERPRETERS_RE = (r"(?:python[23]?(?:\.\d+)?|pypy3?|node|nodejs|deno|bun|perl|ruby|php|julia|"
+                         r"lua(?:jit|\d(?:\.\d)?)?|rscript)")
+# Options before the script; -W/-X take a value (`python3 -W ignore`; matching is case-blind, so
+# -x too). -c/-e/-m end them: the program then comes from an argument (the -c/-e rules) or a
+# module, and stdin is only data.
+_PIPE_INTERP_OPTS = r"(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*))*"
+_PIPE_STDIN_PROGRAM = r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)|\s*(?:\d?[<>]|&>)|\s*$|\s*[;&)]|\s+\|)"
+
+
 # ---- Dangerous command patterns -----------------------------------------------------------
 DANGEROUS_PATTERNS = [
     (r'\brm\s+(-[^\s]*\s+)*/', "delete in root path"),
@@ -310,13 +332,17 @@ DANGEROUS_PATTERNS = [
     (r':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:', "fork bomb"),
     # Shell -c is parsed structurally by _execution_flag_findings(); a regex searching a dash-token
     # for "c" also matched --norc/--rcfile/--restricted.
-    (rf'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:{_SHELL_NAMES_RE})(?:\s|$|-c)', "pipe remote content to shell"),
+    (rf'\b(curl|wget)\b.*{_PIPE_INTO}(?:{_PIPE_SHELLS_RE})(?:\s|$|-c|(?(sub)\)|(?!)))', "pipe remote content to shell"),
     # Fork: the same into an interpreter that reads its program from stdin (no script, -c or -m
     # argument; those read stdin as data or are caught by the -c/-e rules). Upstream removed the
     # tirith scanner (911da42e9e), the only layer that caught `curl URL | python3`.
-    (r'\b(curl|wget)\b.*\|\s*(?:[/\w]*/)?(?:python[23]?(?:\.\d+)?|node|nodejs|deno|bun|perl|ruby|php|julia|lua)'
-     r'(?:\s+-[\w-]*)*(?:\s*$|\s*[;&)]|\s+\|)', "pipe remote content to an interpreter"),
+    (rf'\b(curl|wget)\b.*{_PIPE_INTO}{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}{_PIPE_STDIN_PROGRAM}',
+     "pipe remote content to an interpreter"),
     (rf'\b(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
+    # Fork: an interpreter handed the remote text as its script file (`python3 <(curl …)`,
+    # `node - < <(wget …)`) — the shell rule above only knew shells (2026-10-23 review).
+    (rf'\b{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}\s+<?\s*<\s*\(\s*(curl|wget)\b',
+     "execute remote script via process substitution"),
     # eval/source/. $(curl ...) — equivalent to piping remote content to a shell.
     (r'(?:\beval\b|\bsource\b|\.)\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
     # Cloud instance-metadata (IMDS) credential endpoints — deterministic containment-escape
