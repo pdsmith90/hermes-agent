@@ -102,7 +102,7 @@ class TestMorningBriefingCoverageGate:
         assert _enforce_morning_briefing_coverage(
             {"name": "morning-briefing"}, _manifest_prompt(manifest), carried) == carried
 
-    def test_a_mismatch_the_briefing_explains_as_a_false_positive_is_flagged(self):
+    def test_a_mismatch_the_briefing_explains_as_a_false_positive_counts_as_flagged(self):
         """2026-10-18 (#174): since #169 (10-17) the briefing puts a mismatch it verified as a false
         positive on the job's What Happened line, in those words. The gate's vocabulary did not have
         them, so the 10-18 phone briefing ended with "ledger/prose mismatch … not flagged" two lines

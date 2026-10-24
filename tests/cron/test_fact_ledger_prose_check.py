@@ -10,6 +10,8 @@ notes, not problems.
 
 import sqlite3
 
+import re
+
 import pytest
 
 from cron.scheduler import _fact_write_ledger, _prose_check
@@ -107,6 +109,49 @@ class TestProseCheckPure:
 """
         problems, _ = _prose_check(resp, _rows(3856), [], [], [], [])
         assert problems == []
+
+    @pytest.mark.parametrize("resp, ids", [
+        # 2026-10-23 review: bf36e4e768 blanked every bullet after any line naming the word, across
+        # blank and **bold** lines, so these fabricated arrow claims passed with an empty ledger.
+        ("Checked supersession; results:\n- 3990 → researched\n- fid 3991 → promoted", {3990, 3991}),
+        ("Superseded:\n- 3837 → 3839\n\n**Verdicts**\n- 3990 → researched", {3990}),
+        ("Reviewed 4 pairs:\n- fid 3990 → merged\n- 3991 → 3992", {3990}),
+        ("Superseded:\n- 3837 → 3839\n---\n- 3990 → lesson", {3990}),
+        ("fid 3800 is superseded by 3801 (no action).\nChanges this run:\n- 3990 → memory-entry", {3990}),
+        ("Superseded chains:\n- 3837 → 3839 (fid 3990 → memory-entry)", {3990}),
+    ])
+    def test_a_lineage_header_blanks_only_the_pairs_its_bullets_open_with(self, resp, ids):
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert len(problems) == 1, problems
+        claimed = {int(n) for n in re.findall(r"→ (\d+)", problems[0])}
+        assert claimed == ids, problems
+
+    def test_pairs_under_a_markdown_lineage_heading_are_not_claims(self):
+        resp = "### Superseded pairs\n- 3125 → 3126\n- fid 3156 → fid 3157 (duplicate wording)\n"
+        assert _prose_check(resp, [], [], [], [], [])[0] == []
+
+    @pytest.mark.parametrize("claim, fid", [
+        # 2026-10-23 review: only derivation nouns name a source fact; any other noun is the fact
+        ("Merged duplicates of fid 3990 into fid 3991.", 3990),
+        ("Bumped confidence of fid 3990.", 3990),
+        ("Updated both of fids 3990 and 3991.", 3991),
+        # a negation inside an aside qualifies the write instead of denying it
+        ("Stored (no duplicate) fid 3990.", 3990),
+        ("Created, not merged, fid 3990.", 3990),
+    ])
+    def test_a_non_derivation_noun_or_a_negated_aside_is_still_a_claim(self, claim, fid):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and str(fid) in problems[0], problems
+
+    @pytest.mark.parametrize("resp", [
+        # 2026-10-23 review: the verb as an adjective for an existing fact
+        "Checked against stored facts; fid 3832 still holds.",
+        "Topic covered by stored fid 3832 from 10-19; no new write.",
+        "originally created fid 3832 on 10-19, nothing new tonight",
+        "Deleted copies of fid 3990 were other facts' duplicates",
+    ])
+    def test_an_adjectival_verb_names_an_existing_fact(self, resp):
+        assert _prose_check(resp, [], [], [], [], [])[0] == []
 
     @pytest.mark.parametrize("claim", ["fid 3326 → 0.55", "3274 → CONFIRMED", "fid 3301 -> parked",
                                        "AGED fid=3511 -> attempted-once", "Duplicate merge: fid 3517 → fid 3495"])

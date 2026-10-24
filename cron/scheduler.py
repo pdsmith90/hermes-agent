@@ -2580,10 +2580,12 @@ def _run_doc_header(
 ) -> str:
     """Header of the persisted run document (title, ids, schedule, prompt).
 
-    ``ledger`` (the scheduler's fact-write read-back) goes ABOVE the prompt, not at the end:
-    context_from feeds a downstream job the first 8000 chars of this file, and every real
-    report runs 14-21K, so an appended block would be truncated away from exactly the consumer
-    (the morning briefing) that was repeating the numbers it contradicts."""
+    ``ledger`` (the scheduler's fact-write read-back) goes ABOVE the prompt, not at the end. It was
+    put there so context_from, which fed a downstream job the first 8000 chars of this file, could
+    not truncate it away. Since the 2026-10-19 upstream merge context_from injects only the framed
+    response body (cron/scheduler_prompt.py ``_archive_answer``), so the ledger no longer reaches a
+    context_from consumer at all (no job uses context_from today). Its readers now open this file
+    directly: the morning-briefing manifest lifts the ``Prose check`` line from it."""
     return (
         f"# Cron Job: {title}\n\n"
         f"**Job ID:** {job_id}\n"
@@ -2965,15 +2967,24 @@ _PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
 # fid 3257", 2026-10-05 daily-review): neither is a claim (cron review #168).
 # A verb right before a noun and "of" describes something derived from the fact: "promoted copy of fid
 # 3464" (2026-10-18 consolidate, cron review #173) names what 3472 was copied FROM, and the only write
-# to 3464 that night was another job's — unless the noun is a property of the fact itself ("bumped
-# trust of fid 3464" writes 3464).
+# to 3464 that night was another job's. Only derivation nouns count (2026-10-23 review): any other noun
+# is the fact or part of it, so "bumped trust of fid 3464", "Bumped confidence of fid 3990", "Updated
+# both of fids 3990 and 3991" and "Merged duplicates of fid 3990" stay claims.
 # A negation right before the verb denies it like one in the gap: "no stored fact answers it; fid 3832
 # confirms …" (2026-10-23 consolidate-synthesize, cron review #198) read 3832, not a write that night.
+# A negation denies the verb only as the first word after it ("stored:** None new — fid 3257",
+# "removed nothing; fid 3631"): inside an aside it qualifies the write instead, so "Stored (no
+# duplicate) fid 3990" and "Created, not merged, fid 3990" stay claims (2026-10-23 review).
+# "against stored facts; fid 3832", "covered by stored fid 3832" and "originally created fid 3832" use
+# the verb as an adjective for an existing fact, like "already"/"previously" (2026-10-23 review).
+_PROSE_DERIVED_NOUNS = r"(?:cop(?:y|ies)|versions?|summar(?:y|ies)|digests?|synthes[ie]s|paraphrases?|rewrites?|excerpts?)"
 _PROSE_CLAIM_BEFORE = re.compile(
-    rf"(?<!already[\s-])(?<!previously[\s-])(?<!\bin\s)(?<!\bno\s)(?<!\bnot\s)(?<!\bnever\s)"
+    rf"(?<!already[\s-])(?<!previously[\s-])(?<!originally[\s-])(?<!\bin\s)(?<!\bby\s)(?<!\bagainst\s)"
+    rf"(?<!\bno\s)(?<!\bnot\s)(?<!\bnever\s)"
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
-    rf"(?!\s+(?!(?:trust|trust_score|content|category|tags?|validity|wording|text|body)\b)[a-z][a-z_-]*\s+of\b)"
-    rf"(?:(?!\b(?:none|no|nothing|not)\b)[^.\n\"“”]){{0,25}}?"
+    rf"(?!\s+{_PROSE_DERIVED_NOUNS}\s+of\b)"
+    rf"(?![\s:*_—–-]*(?:none|no|nothing|not)\b)"
+    rf"[^.\n\"“”]{{0,25}}?"
     rf"{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})", re.I)
 # A double-quoted span on one line is a quotation of some other text (a fact, a note, a log line), so
 # a claim verb inside it states nothing this run did. Emptied before every claim rule runs ("" stays,
@@ -3007,13 +3018,43 @@ _PROSE_ID_CHAIN = re.compile(
     rf"(?<![\w./-])(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}){{2,}}(?![\d.])", re.I)
 # "the audit pair (fid 3523 → fid 3524)", "superseded pairs (3125→3126, 3156→3157)": id pairs a
 # lineage word introduces name which fact superseded which (2026-10-11 consolidate, cron review #166).
-# Also matches bullet items under a lineage/superseded header (2026-10-20 consolidate, cron review #201).
 # Blanked before the arrow rule runs, like a chain; a bare "fid 3517 → fid 3495" merge stays a claim.
+_PROSE_LINEAGE_WORD = r"\b(?:pairs?|supersed\w*|supersession|lineage)\b"
 _PROSE_PAIR = rf"(?:{_PROSE_FID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?![\d.])"
 _PROSE_LINEAGE_PAIRS = re.compile(
-    rf"\b(?:pairs?|supersed\w*|supersession|lineage)\b(?:"
-    rf"[^\d\n]{{0,25}}{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*|"
-    rf"[^\n]*(?:\n\s*[-*]\s*[^\n]+)+)", re.I)
+    rf"{_PROSE_LINEAGE_WORD}[^\d\n]{{0,25}}{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*", re.I)
+# The same pairs as a list under a header that names the lineage (2026-10-20 consolidate, cron review
+# #201): "Superseded chains already handled by store:" then "- 3837 → 3839 (spline push status)". The
+# header must introduce the list (a line ending in ":", or a markdown heading), and only a bullet that
+# OPENS with an id → id pair is lineage; the run of bullets ends at the first line that is not a bullet.
+# The first version (bf36e4e768) blanked every bullet after any line naming the word, across blank and
+# **bold** lines, so "Checked supersession; results:\n- 3990 → researched" hid a claim (2026-10-23 review).
+_PROSE_LINEAGE_HEADER = re.compile(
+    rf"^(?:[ \t]*#{{1,6}}[ \t][^\n]*{_PROSE_LINEAGE_WORD}[^\n]*|[^\n]*{_PROSE_LINEAGE_WORD}[^\n]*:[ \t*_]*)$",
+    re.IGNORECASE)
+_PROSE_BULLET = re.compile(r"[ \t]*(?:[-*+]|\d{1,2}[.)])[ \t]+\S")
+_PROSE_LINEAGE_BULLET = re.compile(
+    rf"[ \t]*(?:[-*+]|\d{{1,2}}[.)])[ \t]+(?P<pair>{_PROSE_PAIR}"
+    rf"(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?![\d.]))*)", re.IGNORECASE)
+
+
+def _blank_lineage_pairs(text: str) -> str:
+    """Blank the id pairs a lineage word introduces, inline or as a bulleted list under a lineage
+    header, so the arrow rule does not read "3837 → 3839" as a write. Only the pair itself is
+    blanked: the rest of a bullet line can still carry a claim."""
+    lines = _PROSE_LINEAGE_PAIRS.sub(" ", text).split("\n")
+    in_list = False
+    for i, line in enumerate(lines):
+        if in_list:
+            m = _PROSE_LINEAGE_BULLET.match(line)
+            if m:
+                lines[i] = line[:m.start("pair")] + " " + line[m.end("pair"):]
+                continue
+            if _PROSE_BULLET.match(line):
+                continue
+            in_list = False
+        in_list = bool(_PROSE_LINEAGE_HEADER.match(line))
+    return "\n".join(lines)
 # "Chao 2015 → Guo et al. 2019", "Vernotte 2015 → GRACE-FO": an author-year citation before an arrow
 # traces a lineage, not a write (2026-10-04 dream, 2026-10-09 doc-paper-ingest). Blanked before the
 # arrow rule runs, like a chain. A claim verb or a fid token in the author's place ("Promoted 1983 →",
@@ -3072,7 +3113,7 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
         claimed = {}
         unquoted = _PROSE_QUOTED.sub('""', text)  # an empty quotation still stops a verb's gap
         unchained = _PROSE_UNIT_CHANGE.sub(" ", _PROSE_SETTING_CHANGE.sub(" ", _PROSE_AUTHOR_YEAR.sub(
-            " ", _PROSE_LINEAGE_PAIRS.sub(" ", _PROSE_ID_CHAIN.sub(" ", unquoted)))))
+            " ", _blank_lineage_pairs(_PROSE_ID_CHAIN.sub(" ", unquoted)))))
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
             for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else unquoted):
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
