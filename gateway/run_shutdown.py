@@ -1123,6 +1123,9 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
         # A reboot or poweroff stops every user unit, so the broadcast would only tell the operator what
         # they just did (2026-10-18 KDE-menu reboot, phone message #660 — cron review #175). Per-session
         # pings above stay, as under a quiet drain. A failing or slow probe fails toward the broadcast.
+        # Accepted gap (cron review #175, restated in the 2026-10-23 review): a shutdown nobody at the
+        # keyboard started (an apcupsd low-battery poweroff, an agent's `systemctl reboot`) reads
+        # `stopping` too and goes just as quiet; only the per-session pings remain for it.
         with _log_suppressed(logging.DEBUG, "service-manager-stopping check failed: %s"):
             if await asyncio.wait_for(asyncio.to_thread(_service_manager_stopping), timeout=6.0):
                 logger.info(
