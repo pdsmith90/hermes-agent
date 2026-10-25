@@ -2977,15 +2977,38 @@ _PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
 # duplicate) fid 3990" and "Created, not merged, fid 3990" stay claims (2026-10-23 review).
 # "against stored facts; fid 3832", "covered by stored fid 3832" and "originally created fid 3832" use
 # the verb as an adjective for an existing fact, like "already"/"previously" (2026-10-23 review).
+# The gap never crosses a reference phrase that names a fid: "Updated both to reference fid 3936" (2026-10-25
+# consolidate-synthesize, cron review #215) updated 4005 and 4006, and 3936 is what they now point at.
+# The ids BEFORE the phrase are the update's objects and stay claims, with or without a fid token:
+# "Updated fid 3936 to reference fid 4005" and "Updated 3936 to reference fid 4005" both claim 3936.
 _PROSE_DERIVED_NOUNS = r"(?:cop(?:y|ies)|versions?|summar(?:y|ies)|digests?|synthes[ie]s|paraphrases?|rewrites?|excerpts?)"
+_PROSE_REFERENCE = r"(?<![\w-])(?:to\s+(?:reference|cite|point\s+(?:at|to))|referencing|citing|pointing\s+(?:at|to))\b"
 _PROSE_CLAIM_BEFORE = re.compile(
     rf"(?<!already[\s-])(?<!previously[\s-])(?<!originally[\s-])(?<!\bin\s)(?<!\bby\s)(?<!\bagainst\s)"
     rf"(?<!\bno\s)(?<!\bnot\s)(?<!\bnever\s)"
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
     rf"(?!\s+{_PROSE_DERIVED_NOUNS}\s+of\b)"
     rf"(?![\s:*_—–-]*(?:none|no|nothing|not)\b)"
-    rf"[^.\n\"“”]{{0,25}}?"
-    rf"{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})", re.I)
+    rf"(?:(?!{_PROSE_REFERENCE}\s+(?:{_PROSE_FID_TOKEN})?\d)[^.\n\"“”]){{0,25}}?"
+    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})"
+    rf"|(?<![\w./-])(?P<bare>\d{{3,6}}(?!-\d)(?:\s*(?:[,/]|and|&)\s*\d{{3,6}}(?!-\d))*)(?=\s+{_PROSE_REFERENCE}))",
+    re.I)
+# A clause whose subject is another session, named by its trace or session id, narrates that session's
+# write: "corpus-build (3f2a9c1d7b04) recovered from the approval block and stored fact 3997" (2026-10-25
+# weekly-trace-mining, cron review #215; fid 3997 was written on 10-23). Only the subject position
+# counts: the id opens the clause (a line start, a bullet, or after ; : . ! ?) as "name (hexid)" or
+# "trace|session hexid", and the clause ends at the next , ; : . ! ? dash (also a spaced "-"), arrow,
+# parenthesis, pipe or quotation, or at a first-person word or "then"/"so".
+# So "Checked corpus-build (3f2a9c1d7b04) and stored fact 4100", "corpus-build (3f2a9c1d7b04) failed and I stored fact 4100" and "trace 3f2a9c1d7b04: stored fact 4100" stay claims.
+# A verb claim is dropped only when the whole match, verb to id, sits inside such a clause. A hex id
+# is 12+ hex chars (a trace-archive prefix; short commit hashes are 8-10) with a letter and a digit, so
+# no English word, commit hash or fid is one. Whether the fid existed before the
+# run is no signal: "bumped fid 3316" (2026-10-06) named an old fact the run never touched.
+_PROSE_HEX_ID = r"(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{12,64}\b"
+_PROSE_OTHER_SESSION = re.compile(
+    rf"(?:^[ \t]*(?:(?:[-*+]|\d{{1,2}}[.)])[ \t]+)?|[;:.!?][ \t]+)"
+    rf"(?:[\w./-]+[ \t]+\({_PROSE_HEX_ID}\)|[Tt]race[ \t]+{_PROSE_HEX_ID}|[Ss]ession[ \t]+{_PROSE_HEX_ID})"
+    r"(?:(?!\b(?:I|[Ww]e|[Mm]e|[Mm]y|[Oo]ur|[Tt]hen|[Ss]o)\b|[ \t]-[ \t])[^,;:.!?—–→>()|\"“”\n])*", re.M)
 # A double-quoted span on one line is a quotation of some other text (a fact, a note, a log line), so
 # a claim verb inside it states nothing this run did. Emptied before every claim rule runs ("" stays,
 # so a verb BEFORE the quotation still cannot reach a fid after it); capped at 300 chars and one line so
@@ -3114,8 +3137,11 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
         unquoted = _PROSE_QUOTED.sub('""', text)  # an empty quotation still stops a verb's gap
         unchained = _PROSE_UNIT_CHANGE.sub(" ", _PROSE_SETTING_CHANGE.sub(" ", _PROSE_AUTHOR_YEAR.sub(
             " ", _blank_lineage_pairs(_PROSE_ID_CHAIN.sub(" ", unquoted)))))
+        other_session = [s.span() for s in _PROSE_OTHER_SESSION.finditer(unquoted)]
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
             for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else unquoted):
+                if rx is _PROSE_CLAIM_BEFORE and any(a <= m.start() and m.end() <= b for a, b in other_session):
+                    continue
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
                 for tok in re.findall(r"\d{1,6}", ids):
                     claimed.setdefault(int(tok), m.group("verb").lower())

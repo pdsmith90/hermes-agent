@@ -283,6 +283,52 @@ class TestProseCheckPure:
         problems, _ = _prose_check("Bumped trust of fid 3464 to 1.0.", [], [], [], [], [])
         assert any("bumped 3464" in p for p in problems)
 
+    @pytest.mark.parametrize("ref", ["to reference", "to cite", "to point at", "to point to",
+                                     "now referencing", "citing", "pointing to"])
+    def test_a_fid_after_a_reference_phrase_is_the_target_not_the_object(self, ref):
+        # 2026-10-25 consolidate-synthesize (cron review #215), word for word apart from the phrase
+        resp = ("- **Stale notes corrected**: fids 4005 and 4006 both contained \"likely hallucinated\" "
+                f"notes. Updated both {ref} fid 3936 as the existing paper.")
+        problems, _ = _prose_check(resp, [], [], _rows(4005, 4006), [], [])
+        assert problems == []
+
+    @pytest.mark.parametrize("claim, ledger, ids", [
+        ("Updated fid 3936 to reference fid 4005.", [], {3936}),
+        ("Updated 3936 to reference fid 4005.", [], {3936}),
+        ("Updated fids 4005 and 4006 to reference fid 3936.", [4005], {4006}),
+        ("Updated 4005 and 4006 to reference fid 3936.", [4005], {4006}),
+        ("Updated both to reference fid 3936; stored fid 4100.", [], {4100}),
+    ])
+    def test_the_objects_before_a_reference_phrase_are_still_claims(self, claim, ledger, ids):
+        problems, _ = _prose_check(claim, [], [], _rows(*ledger), [], [])
+        assert len(problems) == 1, problems
+        assert {int(n) for n in re.findall(r"(?:updated|stored) (\d+)", problems[0])} == ids, problems
+
+    @pytest.mark.parametrize("narration", [
+        # 2026-10-25 weekly-trace-mining (cron review #215): fid 3997 was another session's write (10-23)
+        "Three last-error traces checked: docs-sync (a7d41c09e2f5) finished — merged via the SSH-push "
+        "workaround; corpus-build (3f2a9c1d7b04) recovered from the approval block and stored fact 3997.",
+        "- corpus-build (3f2a9c1d7b04) stored fact 3997",
+        "Trace 3f2a9c1d7b04 recovered and stored fid 3997.",
+    ])
+    def test_a_traced_session_as_the_subject_narrates_its_write(self, narration):
+        problems, _ = _prose_check(narration, [], [], [], [], [], job_name="weekly-trace-mining")
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", [
+        "Stored fact 4100.",
+        "Checked corpus-build (3f2a9c1d7b04) and stored fact 4100.",
+        "corpus-build (3f2a9c1d7b04) failed and I stored fact 4100.",
+        "corpus-build (3f2a9c1d7b04) failed, then stored fact 4100.",
+        "trace 3f2a9c1d7b04: stored fact 4100",
+        "In trace 3f2a9c1d7b04 I stored fact 4100.",
+        "Session 3f2a9c1d7b04 stored fact 3997 and we updated fid 4100.",
+        "corpus-build (3f2a9c1d7b04) is clean; stored fact 4100.",
+    ])
+    def test_the_runs_own_write_beside_a_traced_session_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [], job_name="weekly-trace-mining")
+        assert len(problems) == 1 and "4100" in problems[0] and "3997" not in problems[0], problems
+
     def test_unnamed_updates_are_a_note_not_a_problem(self):
         resp = "Claude Memory Distill — 3 notes → 3337/3338/3339; updated 8"
         problems, notes = _prose_check(resp, _rows(3337, 3338, 3339), [], _rows(1789, 1999, 2000, 2031, 2032, 3334, 3335, 3336), [], [])
@@ -303,6 +349,46 @@ class TestProseCheckPure:
     def test_a_number_inside_a_bigger_number_does_not_count_as_named(self):
         problems, _ = _prose_check("context 163840 tokens; 3840 chars", _rows(384), [], [], [], [])
         assert problems == ["created 384 not named in the response"]
+
+    @staticmethod
+    def _claimed(problems):
+        return {int(n) for p in problems for n in re.findall(r"\b[a-z-]+ (\d+)", p.split(" but ")[0])}
+
+    @pytest.mark.parametrize("claim", [
+        # the run's own write after a traced session's clause (arrow, spaced hyphen, aside, "then"/"so")
+        "- corpus-build (3f2a9c1d7b04) recovered from the approval block -> stored lesson fid 4100",
+        "- corpus-build (3f2a9c1d7b04) recovered from the approval block \u2192 stored lesson fid 4100",
+        "- corpus-build (3f2a9c1d7b04) hit the approval block again - stored lesson fid 4100",
+        "- corpus-build (3f2a9c1d7b04) failed again (stored lesson fid 4100)",
+        "corpus-build (3f2a9c1d7b04) failed then stored fact 4100 as a lesson.",
+        "corpus-build (3f2a9c1d7b04) failed so stored fact 4100 as a lesson.",
+        # a short commit hash or hex word in parentheses is not a traced session
+        "Commit (a6b475d694) updated fid 4100 per the fix.",
+        "Cleanup (deadbeef01) removed fid 4100.",
+        "- **corpus-build (3f2a9c1d7b04)**: stored fact 4100",
+        "> corpus-build (3f2a9c1d7b04) failed and stored fact 4100",
+        "He said \"stored fact 3997\" but we stored fact 4100.",
+    ])
+    def test_a_traced_session_lookalike_does_not_hide_the_runs_write(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [], job_name="weekly-trace-mining")
+        assert 4100 in self._claimed(problems), problems
+
+    @pytest.mark.parametrize("claim, rows, ids", [
+        # a reference word is not a reference target unless a fid follows it
+        ("Added a lesson citing it as fid 4100.", [], {4100}),
+        ("Stored lesson citing #215: fid 4100.", [], {4100}),
+        ("Updated the cross-referencing fact 4100.", [], {4100}),
+        ("Updated 4100 to point at fid 3936.", [], {4100}),
+        ("Merged 4100/4101 to cite fid 3936.", [], {4100, 4101}),
+        ("Bumped trust of 4100 citing fid 3936.", [], {4100}),
+        ("Updated fids 4005, 4100 to reference fid 3936.", [4005], {4100}),
+        ("Updated both to reference fid 3936; also stored fact 4100.", [4005, 4006], {4100}),
+        ("Bumped fid 3316 to 0.7.", [], {3316}),
+    ])
+    def test_a_reference_lookalike_does_not_hide_a_write(self, claim, rows, ids):
+        problems, _ = _prose_check(claim, [], [], _rows(*rows), [], [])
+        assert ids <= self._claimed(problems), problems
+        assert 3936 not in self._claimed(problems), problems
 
 
 @pytest.fixture(autouse=True)
