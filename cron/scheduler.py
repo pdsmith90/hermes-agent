@@ -3042,8 +3042,12 @@ _PROSE_ID_CHAIN = re.compile(
 # "the audit pair (fid 3523 → fid 3524)", "superseded pairs (3125→3126, 3156→3157)": id pairs a
 # lineage word introduces name which fact superseded which (2026-10-11 consolidate, cron review #166).
 # Blanked before the arrow rule runs, like a chain; a bare "fid 3517 → fid 3495" merge stays a claim.
-_PROSE_LINEAGE_WORD = r"\b(?:pairs?|supersed\w*|supersession|lineage)\b"
-_PROSE_PAIR = rf"(?:{_PROSE_FID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?![\d.])"
+# "The OpenCode timeout chain (4071→4013/4062) was already handled" (2026-10-26 consolidate, cron review
+# #218) named one correction fact and the two it corrects: "chain" is a lineage word, and the right side
+# of a pair may be a "/" list. A pair may end a sentence: only a decimal ("3126.5") stops it.
+_PROSE_LINEAGE_WORD = r"\b(?:pairs?|chains?|supersed\w*|supersession|lineage)\b"
+_PROSE_PAIR = (rf"(?:{_PROSE_FID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}"
+               rf"(?:\s*/\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}})*(?!\d|\.\d)")
 _PROSE_LINEAGE_PAIRS = re.compile(
     rf"{_PROSE_LINEAGE_WORD}[^\d\n]{{0,25}}{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*", re.I)
 # The same pairs as a list under a header that names the lineage (2026-10-20 consolidate, cron review

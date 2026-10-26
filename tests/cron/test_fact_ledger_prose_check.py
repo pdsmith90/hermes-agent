@@ -126,6 +126,19 @@ class TestProseCheckPure:
         claimed = {int(n) for n in re.findall(r"→ (\d+)", problems[0])}
         assert claimed == ids, problems
 
+    @pytest.mark.parametrize("line", [
+        # 2026-10-26 consolidate (cron review #218): read as the claim "→ 4071"
+        "The OpenCode timeout chain (4071→4013/4062) was already handled by the prior run's correction mechanism.",
+        "Correction chains: 4071→4013/4062, 4100 -> 4101.",
+    ])
+    def test_id_pairs_a_chain_introduces_are_a_lineage_not_a_claim(self, line):
+        resp = f"**STEP 4 — Duplicate merges:** None needed. {line}\ncluster synthesis: OpenCode — fid=4078"
+        assert _prose_check(resp, _rows(4078), [], [], [], [])[0] == []
+
+    def test_a_chain_does_not_excuse_an_arrow_into_a_status(self):
+        problems, _ = _prose_check("Checked the chain; 3990 → researched.", [], [], [], [], [])
+        assert len(problems) == 1 and "3990" in problems[0]
+
     def test_pairs_under_a_markdown_lineage_heading_are_not_claims(self):
         resp = "### Superseded pairs\n- 3125 → 3126\n- fid 3156 → fid 3157 (duplicate wording)\n"
         assert _prose_check(resp, [], [], [], [], [])[0] == []
