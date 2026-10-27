@@ -2112,3 +2112,38 @@ class TestCliApprovalTimeoutClassifiedSeparately:
         assert result.get("user_consent") is False
         assert "timed out without user response" in result["message"]
         assert "Silence is not consent" in result["message"]
+
+
+class TestSqliteHermesDbWithoutReadonly:
+    """sqlite3 on a database under ~/.hermes needs -readonly among its leading options (#227)."""
+
+    @pytest.mark.parametrize("command", [
+        'sqlite3 ~/.hermes/memory_store.db "SELECT 1"',
+        'sqlite3 -header -column ~/.hermes/cron/executions.db "SELECT 1"',
+        'sqlite3 "$HOME/.hermes/state.db" "SELECT 1"',
+        'sqlite3 $HERMES_HOME/memory_store.db "SELECT 1"',
+        'sqlite3 -cmd ".timeout 5" ~/.hermes/state.db "SELECT 1"',
+        'cd ~/.hermes && sqlite3 memory_store.db "SELECT 1"',
+        'sqlite3 cron/executions.db "SELECT 1"',
+        'echo .tables | sqlite3 ~/.hermes/kanban.db',
+        'sudo sqlite3 ~/.hermes/state.db "SELECT 1"',
+        "sqlite3 " + os.path.expanduser("~/.hermes/memory_store.db") + ' "SELECT 1"',
+    ])
+    def test_requires_approval(self, command):
+        dangerous, key, _ = detect_dangerous_command(command)
+        assert dangerous and key == "sqlite3 on a Hermes database without -readonly"
+
+    @pytest.mark.parametrize("command", [
+        'sqlite3 -readonly ~/.hermes/memory_store.db "SELECT 1"',
+        'sqlite3 -header -readonly ~/.hermes/memory_store.db "SELECT 1"',
+        'sqlite3 -readonly -header -column ~/.hermes/cron/executions.db "SELECT 1"',
+        'sqlite3 --readonly $HOME/.hermes/state.db "SELECT 1"',
+        'sqlite3 -readonly memory_store.db "SELECT 1"',
+        'sqlite3 /tmp/scratch.db "SELECT 1"',
+        'sqlite3 ~/projects/foo/state.db "SELECT 1"',
+        'sqlite3 /tmp/state.db "SELECT 1"',
+        'echo "sqlite3 ~/.hermes/state.db"',
+        'git commit -m "sqlite3 ~/.hermes/state.db"',
+    ])
+    def test_readonly_and_other_databases_stay_unprompted(self, command):
+        assert detect_dangerous_command(command) == (False, None, None)

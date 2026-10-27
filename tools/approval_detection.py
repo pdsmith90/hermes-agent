@@ -510,6 +510,16 @@ DANGEROUS_PATTERNS = [
     (_CMDPOS + r'yarn\s+' + _PKG_OPTS + r'(?:global\s+)?(?:uninstall|remove)\b', "package manager uninstall"),
     (_CMDPOS + r'pip(?:3)?\s+' + _PKG_OPTS + r'uninstall\b', "package manager uninstall"),
     (_CMDPOS + r'brew\s+' + _PKG_OPTS + r'(?:uninstall|remove|rm)\b', "package manager uninstall"),
+    # sqlite3 opening a Hermes database without -readonly among its leading options: it can create files or write
+    # rows the store's own writers (HRR vectors, validity windows) would have encoded. Absolute spellings are folded
+    # to ~/.hermes/ by _normalize_command_for_detection; the module sees no cwd, so a relative path counts only in
+    # the shapes Hermes stores take (known store names, or under cron/ state/ memories/ agent-traces/ backups/).
+    (_CMDPOS + r'sqlite3\s+(?:-(?!-?readonly\b)\S+(?:\s+(?:"[^"]*"|\'[^\']*\'|[^-\s]\S*))?\s+)*["\']?'
+     r'(?:(?:~|\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/'
+     r'|(?:\./)?(?:(?:cron|state|memories|agent-traces|backups)/[^\s"\']*\.(?:db|sqlite3?)'
+     r'|(?:memory_store|state|executions|deliveries|notepad|docs_index|kanban|projects|response_store|shared-state'
+     r'|verification_evidence)\.(?:db|sqlite3?)))',
+     "sqlite3 on a Hermes database without -readonly"),
 ]
 
 
