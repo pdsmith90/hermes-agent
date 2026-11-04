@@ -57,3 +57,42 @@ def test_legacy_siblings_move_but_user_named_copies_stay(tmp_path: Path):
     assert (root / "config.yaml.corrupt.20260729-093706.bak").exists()
     assert (tmp_path / "config.yaml.bak-my-note").read_text() == "mine"
     assert not list(tmp_path.glob("config.yaml.bak.*")) and not list(tmp_path.glob("config.yaml.corrupt.*"))
+
+
+def test_two_sweeps_of_a_same_named_sibling_keep_both_copies(tmp_path: Path):
+    # A remade config.yaml.bak.<digits> reuses the swept name; the second sweep must not replace
+    # the copy already in backups/config (that silently lost a real pre-change snapshot).
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model: a\n")
+    (tmp_path / "config.yaml.bak.1778718391").write_text("first snapshot\n")
+    (tmp_path / "config.yaml.bak-note").write_text("mine")
+    backup_config(cfg, "pre-setup")
+
+    cfg.write_text("model: b\n")
+    (tmp_path / "config.yaml.bak.1778718391").write_text("second snapshot\n")
+    backup_config(cfg, "pre-setup")
+
+    root = tmp_path / "backups" / "config"
+    moved = sorted(p.read_text() for p in root.iterdir() if p.name.startswith("config.yaml.bak."))
+    assert moved == ["first snapshot\n", "second snapshot\n"]
+    # The dash-named copy is the user's own and is still untouched beside config.yaml.
+    assert (tmp_path / "config.yaml.bak-note").read_text() == "mine"
+
+
+def test_sweep_of_an_identical_same_named_sibling_keeps_one_copy(tmp_path: Path):
+    # Identical bytes: the resident copy already preserves the content, so only the duplicate in
+    # the home root is dropped — no suffixed twin is kept.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model: a\n")
+    (tmp_path / "config.yaml.bak.1778718391").write_text("same\n")
+    backup_config(cfg, "pre-setup")
+
+    cfg.write_text("model: b\n")
+    (tmp_path / "config.yaml.bak.1778718391").write_text("same\n")
+    backup_config(cfg, "pre-setup")
+
+    root = tmp_path / "backups" / "config"
+    copies = [p for p in root.iterdir() if p.name.startswith("config.yaml.bak.")]
+    assert [p.name for p in copies] == ["config.yaml.bak.1778718391"]
+    assert copies[0].read_text() == "same\n"
+    assert not list(tmp_path.glob("config.yaml.bak.*"))

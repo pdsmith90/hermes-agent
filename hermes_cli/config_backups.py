@@ -96,6 +96,22 @@ def _sweep_legacy_siblings(config_path: Path, root: Path) -> None:
             if not old.is_file() or old.is_symlink():
                 continue
             try:
-                old.replace(root / old.name)
+                dest = root / old.name
+                if dest.is_symlink() or dest.exists():
+                    # A copy already sits under this name (the same sibling swept before, or a
+                    # hand-remade file reusing the name). Replacing it silently DESTROYED a real
+                    # pre-change snapshot on 2026-11-04, so never overwrite: identical bytes are
+                    # already preserved by the resident copy, anything else gets a free-suffixed
+                    # name so both survive.
+                    resident = dest.is_file() and not dest.is_symlink()
+                    if resident and dest.read_bytes() == old.read_bytes():
+                        old.unlink()
+                        continue
+                    n = 1
+                    dest = root / f"{old.name}.{n}"
+                    while dest.is_symlink() or dest.exists():
+                        n += 1
+                        dest = root / f"{old.name}.{n}"
+                old.replace(dest)
             except OSError as exc:
                 logger.debug("Could not move legacy backup %s: %s", old, exc)
