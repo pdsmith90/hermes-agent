@@ -139,6 +139,25 @@ class TestProseCheckPure:
         problems, _ = _prose_check("Checked the chain; 3990 → researched.", [], [], [], [], [])
         assert len(problems) == 1 and "3990" in problems[0]
 
+    @pytest.mark.parametrize("line", [
+        # 2026-11-01 consolidate: the digit in "across 4 facts (" blocked the lineage gap, so the
+        # pair was read as the claim "→ 4229"
+        "The supersession chain across 4 facts (4229→4232) demonstrates proper state tracking "
+        "for multi-step operations.",
+        "The supersession chain across 4 fids 4229 -> 4232 was handled by the prior run.",
+    ])
+    def test_a_chain_pair_after_a_member_count_is_a_lineage_not_a_claim(self, line):
+        resp = f"**STEP 6 — Queue hygiene:** None needed. {line}\ncluster synthesis: LightRAG — fid=4236"
+        assert _prose_check(resp, _rows(4236), [], [], [], [])[0] == []
+
+    @pytest.mark.parametrize("claim", [
+        "The supersession chain across 4 facts stored 4229 → 4232.",
+        "wrote fact 4229 → 4232",
+    ])
+    def test_a_member_count_does_not_excuse_a_write_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and "4229" in problems[0], problems
+
     def test_pairs_under_a_markdown_lineage_heading_are_not_claims(self):
         resp = "### Superseded pairs\n- 3125 → 3126\n- fid 3156 → fid 3157 (duplicate wording)\n"
         assert _prose_check(resp, [], [], [], [], [])[0] == []

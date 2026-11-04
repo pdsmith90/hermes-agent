@@ -3046,10 +3046,17 @@ _PROSE_ID_CHAIN = re.compile(
 # #218) named one correction fact and the two it corrects: "chain" is a lineage word, and the right side
 # of a pair may be a "/" list. A pair may end a sentence: only a decimal ("3126.5") stops it.
 _PROSE_LINEAGE_WORD = r"\b(?:pairs?|chains?|supersed\w*|supersession|lineage)\b"
+# A short count of the chain's members may sit between the lineage word and the pair: "The
+# supersession chain across 4 facts (4229→4232)" (2026-11-01 consolidate) was read as the claim
+# "→ 4229" because the digit blocked the 25-char gap. The gap AFTER the count is 3 characters, so
+# the pair must follow the count almost directly ("(", ", ", a dash): "… chain across 4 facts
+# stored 4229 → 4232" states a write and stays a claim.
+_PROSE_LINEAGE_COUNT = r"\d{1,3}[ \t]+(?:fids?|facts?|ids?)[^\d\n]{0,3}"
 _PROSE_PAIR = (rf"(?:{_PROSE_FID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}"
                rf"(?:\s*/\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}})*(?!\d|\.\d)")
 _PROSE_LINEAGE_PAIRS = re.compile(
-    rf"{_PROSE_LINEAGE_WORD}[^\d\n]{{0,25}}{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*", re.I)
+    rf"{_PROSE_LINEAGE_WORD}[^\d\n]{{0,25}}(?:{_PROSE_LINEAGE_COUNT})?{_PROSE_PAIR}"
+    rf"(?:\s*[,;]\s*{_PROSE_PAIR})*", re.I)
 # The same pairs as a list under a header that names the lineage (2026-10-20 consolidate, cron review
 # #201): "Superseded chains already handled by store:" then "- 3837 → 3839 (spline push status)". The
 # header must introduce the list (a line ending in ":", or a markdown heading), and only a bullet that
