@@ -1,5 +1,6 @@
 """config.yaml backups: one dir, deduped, bounded — never a pile of siblings in HERMES_HOME."""
 import os
+import time
 from pathlib import Path
 
 from hermes_cli.config_backups import backup_config, list_config_backups
@@ -96,3 +97,78 @@ def test_sweep_of_an_identical_same_named_sibling_keeps_one_copy(tmp_path: Path)
     assert [p.name for p in copies] == ["config.yaml.bak.1778718391"]
     assert copies[0].read_text() == "same\n"
     assert not list(tmp_path.glob("config.yaml.bak.*"))
+
+
+def _age(path: Path, days: float) -> None:
+    stamp = time.time() - days * 86400
+    os.utime(path, (stamp, stamp))
+
+
+def test_legacy_sweep_keeps_only_the_ten_newest_old_copies(tmp_path: Path):
+    # Swept copies are bounded: the newest 10 by mtime survive, the older remainder does not.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model: a\n")
+    for i in range(12):
+        sibling = tmp_path / f"config.yaml.bak.17787183{i:02d}"
+        sibling.write_text(f"snapshot {i}\n")
+        _age(sibling, 40 + i)  # every one is past 30 days; i=11 is the oldest
+
+    backup_config(cfg, "pre-setup")
+
+    kept = sorted(p.name for p in (tmp_path / "backups" / "config").glob("config.yaml.bak.*"))
+    assert kept == [f"config.yaml.bak.17787183{i:02d}" for i in range(10)]
+
+
+def test_legacy_copy_younger_than_thirty_days_survives_beyond_ten(tmp_path: Path):
+    # Beyond the newest 10, age alone decides: one day old is never pruned.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model: a\n")
+    for i in range(11):
+        recent = tmp_path / f"config.yaml.bak.17787184{i:02d}"
+        recent.write_text("recent\n")
+        _age(recent, 1)
+    ancient = tmp_path / "config.yaml.bak.1778718099"
+    ancient.write_text("ancient\n")
+    _age(ancient, 60)
+
+    backup_config(cfg, "pre-setup")
+
+    names = {p.name for p in (tmp_path / "backups" / "config").glob("config.yaml.bak.*")}
+    assert names == {f"config.yaml.bak.17787184{i:02d}" for i in range(11)}
+    assert ancient.name not in names
+
+
+def test_legacy_prune_leaves_reason_stamped_backups_alone(tmp_path: Path):
+    # config.yaml.<reason>.<stamp> keeps its own keep= rotation; 12 ancient ones must all survive.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model: a\n")
+    root = tmp_path / "backups" / "config"
+    root.mkdir(parents=True)
+    for i in range(12):
+        stamped = root / f"config.yaml.good.202601010000{i:02d}"
+        stamped.write_text("old\n")
+        _age(stamped, 400)
+    sibling = tmp_path / "config.yaml.bak.1778718391"
+    sibling.write_text("legacy\n")
+    _age(sibling, 60)
+
+    assert backup_config(cfg, "pre-setup") is not None
+
+    assert len(list(root.glob("config.yaml.good.*"))) == 12
+    assert (root / "config.yaml.bak.1778718391").exists()
+
+
+def test_plain_load_does_not_prune(tmp_path: Path):
+    # The prune runs only after a sweep; a load with nothing to sweep leaves the dir untouched.
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("model: a\n")
+    root = tmp_path / "backups" / "config"
+    root.mkdir(parents=True)
+    for i in range(12):
+        old = root / f"config.yaml.bak.17787183{i:02d}"
+        old.write_text("old\n")
+        _age(old, 100)
+
+    backup_config(cfg, "pre-setup")
+
+    assert len(list(root.glob("config.yaml.bak.*"))) == 12

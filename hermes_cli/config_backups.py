@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 
 BACKUPS_SUBDIR = Path("backups") / "config"
 DEFAULT_KEEP = 5
+# Swept legacy copies are bounded too: the newest LEGACY_KEEP by mtime survive, and nothing
+# younger than LEGACY_MIN_AGE_DAYS is ever deleted, however many there are.
+LEGACY_KEEP = 10
+LEGACY_MIN_AGE_DAYS = 30
 
 # Names earlier code wrote next to config.yaml (setup wizard, corrupt snapshot, xai migration).
 # Moved into the backups dir on first use so they stop accumulating in the home root; hand-named
@@ -52,7 +56,9 @@ def backup_config(config_path: Path, reason: str, *, keep: int = DEFAULT_KEEP) -
             return None
         root = backups_dir(config_path)
         root.mkdir(parents=True, exist_ok=True)
-        _sweep_legacy_siblings(config_path, root)
+        if _sweep_legacy_siblings(config_path, root):
+            # Only after a sweep: a plain load must not walk the backups dir for nothing.
+            _prune_legacy_backups(root)
         existing = list_config_backups(config_path, reason)
         # Not filecmp.cmp: its process-wide cache keys on (size, mtime), so an equal-size edit
         # within one mtime tick of an earlier comparison is reported identical and never backed up.
@@ -90,7 +96,9 @@ def load_newest_good_backup(config_path: Path) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
-def _sweep_legacy_siblings(config_path: Path, root: Path) -> None:
+def _sweep_legacy_siblings(config_path: Path, root: Path) -> int:
+    """Move legacy siblings beside *config_path* into *root*; return how many left the home root."""
+    swept = 0
     for pattern in _LEGACY_SIBLING_GLOBS:
         for old in config_path.parent.glob(pattern):
             if not old.is_file() or old.is_symlink():
@@ -106,6 +114,7 @@ def _sweep_legacy_siblings(config_path: Path, root: Path) -> None:
                     resident = dest.is_file() and not dest.is_symlink()
                     if resident and dest.read_bytes() == old.read_bytes():
                         old.unlink()
+                        swept += 1
                         continue
                     n = 1
                     dest = root / f"{old.name}.{n}"
@@ -113,5 +122,32 @@ def _sweep_legacy_siblings(config_path: Path, root: Path) -> None:
                         n += 1
                         dest = root / f"{old.name}.{n}"
                 old.replace(dest)
+                swept += 1
             except OSError as exc:
                 logger.debug("Could not move legacy backup %s: %s", old, exc)
+    return swept
+
+
+def _prune_legacy_backups(root: Path) -> None:
+    """Bound the swept legacy copies in *root*; reason-stamped backups keep their own rotation.
+
+    Newest ``LEGACY_KEEP`` by mtime survive, and nothing younger than ``LEGACY_MIN_AGE_DAYS`` is
+    deleted however many there are, so the names the sweep moved cannot grow without limit.
+    """
+    try:
+        patterns = [
+            variant
+            for pat in _LEGACY_SIBLING_GLOBS
+            for variant in (pat, f"{pat}.[0-9]*")  # the .<n> names a collision writes
+        ]
+        found = {
+            p for pat in patterns for p in root.glob(pat)
+            if p.is_file() and not p.is_symlink()
+        }
+        cutoff = time.time() - LEGACY_MIN_AGE_DAYS * 86400
+        ranked = sorted(found, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+        for stale in ranked[LEGACY_KEEP:]:
+            if stale.stat().st_mtime < cutoff:
+                stale.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.debug("Could not prune legacy backups in %s: %s", root, exc)
