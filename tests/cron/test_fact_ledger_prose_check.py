@@ -434,6 +434,34 @@ def _clean_shared_registry():
             pass
     MemoryStore._shared.clear()
 
+    def test_a_parenthesised_pair_on_a_lineage_line_is_lineage(self):
+        # 2026-11-06 consolidate-synthesize (cron review #260), word for word: the chains blank first, then
+        # "(4440 → 4441)" sits 28 characters after "chain" — past the 25-char gap — and was read as "→ 4440".
+        resp = ("STEP 3 — Contradictions resolved this run: none.\nAlready resolved earlier: shellcheck chain "
+                "(4092 → 4411 → 4443), GRACE-Spline gapfill chain (4365 → 4445 → 4446), dispatch reassessment "
+                "(4440 → 4441). All supersessions verified with valid_until set and trust at floor.")
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", [
+        "Supersession chain ( ) handled; then the two dispatch facts were merged (4440 → 4441).",
+        "dispatch reassessment (4440 → 4441) in this run",
+    ])
+    def test_a_verb_into_the_parenthesis_or_no_lineage_word_keeps_the_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and "4440" in problems[0], problems
+
+    @pytest.mark.parametrize("branch", ["to main", "into pds", "onto master", "to upstream"])
+    def test_a_git_merge_to_a_branch_is_not_a_store_merge(self, branch):
+        # 2026-11-06 consolidate-synthesize (cron review #260): a fact's title repeated in the inventory
+        resp = f"Active entities: GRACE-Spline gapfill (merged {branch}, fid 4446). Three new papers ingested."
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert problems == []
+
+    def test_a_merge_into_a_fid_is_still_a_claim(self):
+        problems, _ = _prose_check("Duplicates merged into fid 4446.", [], [], [], [], [])
+        assert len(problems) == 1 and "merged 4446" in problems[0], problems
+
 
 @pytest.fixture
 def ledger(tmp_path, monkeypatch):

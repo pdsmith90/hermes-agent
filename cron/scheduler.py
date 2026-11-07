@@ -2983,11 +2983,16 @@ _PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
 # "Updated fid 3936 to reference fid 4005" and "Updated 3936 to reference fid 4005" both claim 3936.
 _PROSE_DERIVED_NOUNS = r"(?:cop(?:y|ies)|versions?|summar(?:y|ies)|digests?|synthes[ie]s|paraphrases?|rewrites?|excerpts?)"
 _PROSE_REFERENCE = r"(?<![\w-])(?:to\s+(?:reference|cite|point\s+(?:at|to))|referencing|citing|pointing\s+(?:at|to))\b"
+# "merged to main", "merged into pds": a verb followed by a branch name is a git merge, not a store write.
+# "GRACE-Spline gapfill (merged to main, fid 4446)" (2026-11-06 consolidate-synthesize, cron review #260)
+# repeated a fact's title and was read as the claim "merged 4446". "merged into fid 4446" stays a claim.
+_PROSE_BRANCHES = r"(?:main|master|trunk|pds|dev|develop|upstream|origin)"
 _PROSE_CLAIM_BEFORE = re.compile(
     rf"(?<!already[\s-])(?<!previously[\s-])(?<!originally[\s-])(?<!\bin\s)(?<!\bby\s)(?<!\bagainst\s)"
     rf"(?<!\bno\s)(?<!\bnot\s)(?<!\bnever\s)"
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
     rf"(?!\s+{_PROSE_DERIVED_NOUNS}\s+of\b)"
+    rf"(?!\s+(?:to|into|onto)\s+{_PROSE_BRANCHES}\b)"
     rf"(?![\s:*_—–-]*(?:none|no|nothing|not)\b)"
     rf"(?:(?!{_PROSE_REFERENCE}\s+(?:{_PROSE_FID_TOKEN})?\d)[^.\n\"“”]){{0,25}}?"
     rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})"
@@ -3072,10 +3077,32 @@ _PROSE_LINEAGE_BULLET = re.compile(
     rf"(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?![\d.]))*)", re.IGNORECASE)
 
 
+# A parenthesised pair on a line that names a lineage says which fact superseded which, wherever it
+# sits on the line: "Already resolved earlier: shellcheck chain (4092 → 4411 → 4443), …, dispatch
+# reassessment (4440 → 4441)" (2026-11-06 consolidate-synthesize, cron review #260) put the pair 28
+# characters after "chain", past the 25-char gap above, and it was read as the claim "→ 4440". A claim
+# verb leading into the parenthesis states a write: "… were merged (4440 → 4441)" stays a claim.
+_PROSE_LINEAGE_LINE = re.compile(_PROSE_LINEAGE_WORD, re.IGNORECASE)
+_PROSE_PAREN_PAIR = re.compile(rf"\((?P<pair>{_PROSE_PAIR})\)", re.IGNORECASE)
+_PROSE_VERB_INTO_PAREN = re.compile(rf"\b(?:{_PROSE_CLAIM_VERBS})\b[^\d\n(]{{0,25}}$", re.IGNORECASE)
+
+
+def _blank_paren_pairs(line: str) -> str:
+    out, pos = [], 0
+    for m in _PROSE_PAREN_PAIR.finditer(line):
+        if _PROSE_VERB_INTO_PAREN.search(line[:m.start()]):
+            continue
+        out.append(line[pos:m.start("pair")] + " ")
+        pos = m.end("pair")
+    out.append(line[pos:])
+    return "".join(out)
+
+
 def _blank_lineage_pairs(text: str) -> str:
-    """Blank the id pairs a lineage word introduces, inline or as a bulleted list under a lineage
-    header, so the arrow rule does not read "3837 → 3839" as a write. Only the pair itself is
-    blanked: the rest of a bullet line can still carry a claim."""
+    """Blank the id pairs a lineage word introduces — inline, as a bulleted list under a lineage
+    header, or parenthesised anywhere on a line that names a lineage — so the arrow rule does not
+    read "3837 → 3839" as a write. Only the pair itself is blanked: the rest of a bullet line can
+    still carry a claim."""
     lines = _PROSE_LINEAGE_PAIRS.sub(" ", text).split("\n")
     in_list = False
     for i, line in enumerate(lines):
@@ -3088,7 +3115,7 @@ def _blank_lineage_pairs(text: str) -> str:
                 continue
             in_list = False
         in_list = bool(_PROSE_LINEAGE_HEADER.match(line))
-    return "\n".join(lines)
+    return "\n".join(_blank_paren_pairs(l) if _PROSE_LINEAGE_LINE.search(l) else l for l in lines)
 # "Chao 2015 → Guo et al. 2019", "Vernotte 2015 → GRACE-FO": an author-year citation before an arrow
 # traces a lineage, not a write (2026-10-04 dream, 2026-10-09 doc-paper-ingest). Blanked before the
 # arrow rule runs, like a chain. A claim verb or a fid token in the author's place ("Promoted 1983 →",
