@@ -371,3 +371,14 @@ def test_multiplex_closure_handler_without_callback_falls_back_to_env(monkeypatc
     assert adapter._is_user_authorized_from_message(
         _make_message(from_user_id=555, chat_id=-100123, chat_type="group")
     ) is False
+
+
+def test_blocked_user_log_line_carries_the_message_id(caplog):
+    """A blocked DM still uses an id from the bot's message counter; logging it lets an id audit account for it."""
+    import logging
+
+    adapter = _make_adapter()
+    msg = _make_message(from_user_id=777, chat_id=777, chat_type="private")
+    with caplog.at_level(logging.WARNING):
+        adapter._log_blocked_user(msg)
+    assert "[Telegram] Blocked unauthorized user 777 in chat 777 message_id=42" in caplog.text

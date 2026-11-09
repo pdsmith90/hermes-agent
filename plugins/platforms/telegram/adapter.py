@@ -6475,9 +6475,12 @@ class TelegramAdapter(TelegramHeldInboundMixin, BasePlatformAdapter):
         return getattr(update, "effective_message", None) or getattr(update, "message", None)
 
     def _log_blocked_user(self, msg, *, level=logging.WARNING, what: str = "unauthorized user") -> None:
+        # message_id: a blocked DM still takes an id from the bot's private-chat counter, so an id audit
+        # that cannot see it reads the hole as another client using the token.
         logger.log(
-            level, "[Telegram] Blocked %s %s in chat %s", what, getattr(getattr(msg, "from_user", None), "id", None),
-            getattr(getattr(msg, "chat", None), "id", None))
+            level, "[Telegram] Blocked %s %s in chat %s message_id=%s", what,
+            getattr(getattr(msg, "from_user", None), "id", None), getattr(getattr(msg, "chat", None), "id", None),
+            getattr(msg, "message_id", None))
 
     def _gate_or_observe(self, msg, update, msg_type: MessageType) -> bool:
         """Group trigger gate; observes unmentioned chatter when configured. True = proceed."""
