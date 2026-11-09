@@ -3085,11 +3085,17 @@ _PROSE_LINEAGE_BULLET = re.compile(
 _PROSE_LINEAGE_LINE = re.compile(_PROSE_LINEAGE_WORD, re.IGNORECASE)
 _PROSE_PAREN_PAIR = re.compile(rf"\((?P<pair>{_PROSE_PAIR})\)", re.IGNORECASE)
 _PROSE_VERB_INTO_PAREN = re.compile(rf"\b(?:{_PROSE_CLAIM_VERBS})\b[^\d\n(]{{0,25}}$", re.IGNORECASE)
+# A pair right before a lineage noun names that lineage: "fid 4500 → fid 4531 supersession was already
+# resolved earlier by the antigravity-client session" (2026-11-09 consolidate-synthesize) was read as the
+# claim "→ 4500". Nouns only: "3381 → 3391 superseded" reports a result and stays a claim, and a claim
+# verb leading into the pair states a write as above: "merged 4440 → 4441 chain" stays a claim.
+_PROSE_PAIR_BEFORE_LINEAGE = re.compile(
+    rf"(?P<pair>{_PROSE_PAIR})[ \t()]{{0,3}}\b(?:pairs?|chains?|supersessions?|lineage)\b", re.IGNORECASE)
 
 
-def _blank_paren_pairs(line: str) -> str:
+def _blank_paren_pairs(line: str, rx: re.Pattern = _PROSE_PAREN_PAIR) -> str:
     out, pos = [], 0
-    for m in _PROSE_PAREN_PAIR.finditer(line):
+    for m in rx.finditer(line):
         if _PROSE_VERB_INTO_PAREN.search(line[:m.start()]):
             continue
         out.append(line[pos:m.start("pair")] + " ")
@@ -3100,7 +3106,7 @@ def _blank_paren_pairs(line: str) -> str:
 
 def _blank_lineage_pairs(text: str) -> str:
     """Blank the id pairs a lineage word introduces — inline, as a bulleted list under a lineage
-    header, or parenthesised anywhere on a line that names a lineage — so the arrow rule does not
+    header, parenthesised anywhere on a line that names a lineage, or right before a lineage noun — so the arrow rule does not
     read "3837 → 3839" as a write. Only the pair itself is blanked: the rest of a bullet line can
     still carry a claim."""
     lines = _PROSE_LINEAGE_PAIRS.sub(" ", text).split("\n")
@@ -3115,7 +3121,8 @@ def _blank_lineage_pairs(text: str) -> str:
                 continue
             in_list = False
         in_list = bool(_PROSE_LINEAGE_HEADER.match(line))
-    return "\n".join(_blank_paren_pairs(l) if _PROSE_LINEAGE_LINE.search(l) else l for l in lines)
+    return "\n".join(_blank_paren_pairs(_blank_paren_pairs(l), _PROSE_PAIR_BEFORE_LINEAGE)
+                     if _PROSE_LINEAGE_LINE.search(l) else l for l in lines)
 # "Chao 2015 → Guo et al. 2019", "Vernotte 2015 → GRACE-FO": an author-year citation before an arrow
 # traces a lineage, not a write (2026-10-04 dream, 2026-10-09 doc-paper-ingest). Blanked before the
 # arrow rule runs, like a chain. A claim verb or a fid token in the author's place ("Promoted 1983 →",

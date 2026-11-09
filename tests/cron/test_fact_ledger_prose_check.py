@@ -423,17 +423,6 @@ class TestProseCheckPure:
         assert 3936 not in self._claimed(problems), problems
 
 
-@pytest.fixture(autouse=True)
-def _clean_shared_registry():
-    MemoryStore._shared.clear()
-    yield
-    for entry in list(MemoryStore._shared.values()):
-        try:
-            entry["conn"].close()
-        except sqlite3.Error:
-            pass
-    MemoryStore._shared.clear()
-
     def test_a_parenthesised_pair_on_a_lineage_line_is_lineage(self):
         # 2026-11-06 consolidate-synthesize (cron review #260), word for word: the chains blank first, then
         # "(4440 → 4441)" sits 28 characters after "chain" — past the 25-char gap — and was read as "→ 4440".
@@ -461,6 +450,34 @@ def _clean_shared_registry():
     def test_a_merge_into_a_fid_is_still_a_claim(self):
         problems, _ = _prose_check("Duplicates merged into fid 4446.", [], [], [], [], [])
         assert len(problems) == 1 and "merged 4446" in problems[0], problems
+
+    def test_a_pair_before_a_lineage_noun_is_lineage(self):
+        # 2026-11-09 consolidate-synthesize, word for word: the noun FOLLOWS the pair, so the rules keyed on
+        # a lineage word before it missed it and the line was read as the claim "→ 4500".
+        resp = ("STEP 3 — Contradictions resolved this run: 0 contradictions found. fid 4500 → fid 4531 "
+                "supersession was already resolved earlier by the antigravity-client session (valid_until set, "
+                "superseded_by=4531).")
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", [
+        "Then merged 4440 → 4441 chain members into one.",
+        "fid 4440 → fid 4441 superseded tonight.",
+    ])
+    def test_a_verb_into_the_pair_or_a_verdict_after_it_keeps_the_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and "4440" in problems[0], problems
+
+@pytest.fixture(autouse=True)
+def _clean_shared_registry():
+    MemoryStore._shared.clear()
+    yield
+    for entry in list(MemoryStore._shared.values()):
+        try:
+            entry["conn"].close()
+        except sqlite3.Error:
+            pass
+    MemoryStore._shared.clear()
 
 
 @pytest.fixture
