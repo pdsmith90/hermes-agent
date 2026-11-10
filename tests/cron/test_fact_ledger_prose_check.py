@@ -468,6 +468,26 @@ class TestProseCheckPure:
         problems, _ = _prose_check(claim, [], [], [], [], [])
         assert len(problems) == 1 and "4440" in problems[0], problems
 
+    @pytest.mark.parametrize("resp", [
+        # 2026-11-10 session-distill (names replaced by stand-ins): "4430-4438" let the id list back off to "443" (the next
+        # character is then a digit, not "-"), and the run was flagged for the claim "stored 443".
+        "opencode@host ses_0a1b2c3d (2026-11-05): nothing durable (turns 1-7) — review + fixes; self-stored as "
+        "fids 4430-4438, 4447, 4450-4451. Turns 8-12 arrive in a later run.",
+        # the same back-off turned a date into an id: "2026-11-09" was read as fid 202
+        "Created facts 2026-11-09 through the evening session.",
+    ])
+    def test_a_range_or_a_date_is_never_read_as_its_leading_digits(self, resp):
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert problems == [], problems
+
+    @pytest.mark.parametrize("ref", ["self-stored as fids 4413, 4414", "Self-stored as fid 4413"])
+    def test_a_self_stored_fid_is_another_writers_not_a_claim(self, ref):
+        # 2026-11-10 session-distill: "<session>: nothing durable — …; self-stored as fids 4413, 4414" names the
+        # facts the distilled session wrote itself, days before this run.
+        resp = f"opencode@host ses_1a2b3c4d (2026-11-04): nothing durable — config sync + hook check; {ref}"
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert problems == [], problems
+
 @pytest.fixture(autouse=True)
 def _clean_shared_registry():
     MemoryStore._shared.clear()

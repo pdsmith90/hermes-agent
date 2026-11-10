@@ -2952,14 +2952,17 @@ _PROSE_CLAIM_VERBS = (
 )
 _PROSE_FID_TOKEN = r"(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*"
 # an id list: "3323/3324", "871, 872, 893", "fid 893 and fid 892" — every number inside it is a claim
-# (?!-\d): a number that continues as a date ("2026-10-05") is never an id
-_PROSE_ID_LIST = r"\d{1,6}(?!-\d)(?:\s*(?:[,/]|and|&)\s*(?:(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*)?\d{1,6}(?!-\d))*"
+# (?!\d|-\d): a number that continues as a date ("2026-10-05") or a range ("4430-4438") is never an id,
+# and neither are its leading digits: with (?!-\d) alone \d{1,6} backed off one digit, so the range was read
+# as fid 443 and the date as fid 202 (2026-11-10 session-distill, cron review #269).
+_PROSE_ID_LIST = r"\d{1,6}(?!\d|-\d)(?:\s*(?:[,/]|and|&)\s*(?:(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*)?\d{1,6}(?!\d|-\d))*"
 # a bare list (no fid token) must look like fids: 3+ digits, so "open-question 6 → 5" is a count, not a claim
-_PROSE_BARE_LIST = r"\d{3,6}(?!-\d)(?:\s*[,/]\s*\d{3,6}(?!-\d))*"
+_PROSE_BARE_LIST = r"\d{3,6}(?!\d|-\d)(?:\s*[,/]\s*\d{3,6}(?!\d|-\d))*"
 # "stored fid=3325", "Demoted predecessor fid=3273", "removed fid 893 and fid 892": verb, a short digit-free
 # gap, a fid token — "FACTS PROMOTED (2): fids 901, 902" included. (A 60-char gap matched "created facts …
 # I noticed fid 626" on a real report; 25 chars does not.) "already stored as fid 1335" / "previously
-# created fid N" point at an existing fact, not a write (2026-10-08 doc-paper-ingest), so not a claim.
+# created fid N" point at an existing fact, not a write (2026-10-08 doc-paper-ingest), so not a claim; nor does
+# "self-stored as fids 4413, 4414", which names the facts a distilled session wrote itself (2026-11-10, #269).
 # The gap never crosses a double quote: '"… branches are removed" not stated by cited fids 3631'
 # (2026-10-14 memory-verify) quoted a fact's wording, and the verb belongs to the quotation.
 # A verb right after "in" describes facts ("Already well-captured in stored facts (fids 755, 817)",
@@ -2988,7 +2991,7 @@ _PROSE_REFERENCE = r"(?<![\w-])(?:to\s+(?:reference|cite|point\s+(?:at|to))|refe
 # repeated a fact's title and was read as the claim "merged 4446". "merged into fid 4446" stays a claim.
 _PROSE_BRANCHES = r"(?:main|master|trunk|pds|dev|develop|upstream|origin)"
 _PROSE_CLAIM_BEFORE = re.compile(
-    rf"(?<!already[\s-])(?<!previously[\s-])(?<!originally[\s-])(?<!\bin\s)(?<!\bby\s)(?<!\bagainst\s)"
+    rf"(?<!already[\s-])(?<!previously[\s-])(?<!originally[\s-])(?<!self-)(?<!\bin\s)(?<!\bby\s)(?<!\bagainst\s)"
     rf"(?<!\bno\s)(?<!\bnot\s)(?<!\bnever\s)"
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
     rf"(?!\s+{_PROSE_DERIVED_NOUNS}\s+of\b)"
@@ -2996,7 +2999,7 @@ _PROSE_CLAIM_BEFORE = re.compile(
     rf"(?![\s:*_—–-]*(?:none|no|nothing|not)\b)"
     rf"(?:(?!{_PROSE_REFERENCE}\s+(?:{_PROSE_FID_TOKEN})?\d)[^.\n\"“”]){{0,25}}?"
     rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})"
-    rf"|(?<![\w./-])(?P<bare>\d{{3,6}}(?!-\d)(?:\s*(?:[,/]|and|&)\s*\d{{3,6}}(?!-\d))*)(?=\s+{_PROSE_REFERENCE}))",
+    rf"|(?<![\w./-])(?P<bare>\d{{3,6}}(?!\d|-\d)(?:\s*(?:[,/]|and|&)\s*\d{{3,6}}(?!\d|-\d))*)(?=\s+{_PROSE_REFERENCE}))",
     re.I)
 # A clause whose subject is another session, named by its trace or session id, narrates that session's
 # write: "corpus-build (3f2a9c1d7b04) recovered from the approval block and stored fact 3997" (2026-10-25
