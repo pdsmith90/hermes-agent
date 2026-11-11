@@ -30,6 +30,7 @@ from tools.approval_context import (
 )
 from tools.approval_detection import (
     _approval_key_aliases, _check_sudo_stdin_guard, detect_dangerous_command, detect_hardline_command,
+    detect_remote_exec_command,
 )
 from tools.approval_floors import (
     _command_matches_permanent_allowlist, _hardline_block_result, _match_user_deny_rule, _sudo_stdin_block_result,
@@ -1078,7 +1079,8 @@ def _floor_block(command: str, *, sudo_guard: bool = False) -> dict | None:
     only), the user's own approvals.deny rules ("never, even under yolo"), and
     deletion of the Python interpreter/venv this very runtime boots from (a
     delete the agent cannot walk back — the next start fails before any tool
-    can run, #58748)."""
+    can run, #58748), and (fork) fetch-and-execute of remote content, checked
+    after the deny rules so a matching deny rule still reports itself."""
     from agent.runtime_self_protection import command_deletes_runtime
 
     is_hardline, hardline_desc = detect_hardline_command(command)
@@ -1094,7 +1096,14 @@ def _floor_block(command: str, *, sudo_guard: bool = False) -> dict | None:
         if is_sudo_guess:
             logger.warning("Sudo stdin guard block: %s (command: %s)", sudo_guess_desc, command[:200])
             return _sudo_stdin_block_result(sudo_guess_desc)
-    return _user_deny_block(command)
+    blocked = _user_deny_block(command)
+    if blocked is not None:
+        return blocked
+    is_remote_exec, remote_exec_desc = detect_remote_exec_command(command)
+    if is_remote_exec:
+        logger.warning("Remote-exec floor block: %s (command: %s)", remote_exec_desc, command[:200])
+        return _hardline_block_result(remote_exec_desc, command)
+    return None
 
 
 def check_dangerous_command(command: str, env_type: str,

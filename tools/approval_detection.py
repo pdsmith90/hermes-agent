@@ -243,7 +243,10 @@ _PIPE_INTERPRETERS_RE = (r"(?:python[23]?(?:\.\d+)?|pypy3?|node|nodejs|deno|bun|
 # -x too). -c/-e/-m end them: the program then comes from an argument (the -c/-e rules) or a
 # module, and stdin is only data.
 _PIPE_INTERP_OPTS = r"(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*))*"
-_PIPE_STDIN_PROGRAM = r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)|\s*(?:\d?[<>]|&>)|\s*$|\s*[;&)]|\s+\|)"
+# Fork (2026-11-11): an OUTPUT redirect after the interpreter still leaves the pipe as its program; an
+# input redirect (`| python3 << 'EOF'`, `< script.py`) replaces stdin, so the program is local. The
+# remote `python3 < <(curl …)` form is the interpreter process-substitution rule's.
+_PIPE_STDIN_PROGRAM = r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)|\s*(?:\d?>|&>)|\s*$|\s*[;&)]|\s+\|)"
 
 
 # ---- Dangerous command patterns -----------------------------------------------------------
@@ -344,7 +347,15 @@ DANGEROUS_PATTERNS = [
     (rf'\b{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}\s+<?\s*<\s*\(\s*(curl|wget)\b',
      "execute remote script via process substitution"),
     # eval/source/. $(curl ...) — equivalent to piping remote content to a shell.
-    (r'(?:\beval\b|\bsource\b|\.)\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
+    # Fork (2026-11-11): an optional quote before $( — the usual `eval "$(curl …)"` form slipped past.
+    (r'(?:\beval\b|\bsource\b|\.)\s*["\']?\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),
+    # Fork (2026-11-11): `source <(curl …)` / `. <(curl …)` — the process-substitution rules knew only
+    # shell and interpreter names.
+    (r'(?:\bsource|(?:^|[\s;&|(])\.)\s+<\s*\(\s*(?:curl|wget)\b', "execute remote script via process substitution"),
+    # Fork (2026-11-11): the same handed to a shell's -c (`sh -c "$(curl …)"`), which only the generic
+    # -c finding caught, so the remote-execution floor could not see it.
+    (rf'\b(?:{_SHELL_NAMES_RE})\s+-\w*c\w*\s+["\']?\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b',
+     "execute remote content via command substitution"),
     # Cloud instance-metadata (IMDS) credential endpoints — deterministic containment-escape
     # detection. On a cloud VM these serve live IAM/service-account credentials to ANY local
     # process with no auth, so a fetch is credential exfiltration unless the operator expects it.
@@ -1630,3 +1641,29 @@ def detect_dangerous_command(command: str) -> tuple:
     if _is_shell_token_spliced_gateway_lifecycle(command):
         return (True, _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION, _GATEWAY_LIFECYCLE_SPLICE_DESCRIPTION)
     return (False, None, None)
+
+
+# Fork (2026-11-11): fetch-and-execute is a floor on this rig, not an approvable pattern. A backdoored
+# checkpoint's whole payload can be one such command (Lazarus, Microsoft Research 2026-11), and yolo,
+# approvals.mode=off and `hermes -z` skip the pattern layer above. Agents never install software here.
+_REMOTE_EXEC_DESCRIPTIONS = frozenset({
+    "pipe remote content to shell",
+    "pipe remote content to an interpreter",
+    "execute remote script via process substitution",
+    "execute remote content via command substitution",
+})
+_REMOTE_EXEC_PATTERNS_COMPILED = [
+    (pattern_re, description) for pattern_re, description in DANGEROUS_PATTERNS_COMPILED
+    if description in _REMOTE_EXEC_DESCRIPTIONS
+]
+
+
+def detect_remote_exec_command(command: str) -> tuple:
+    """-> (is_remote_exec, description). Checks every fetch-and-execute pattern rather than the
+    first dangerous match, since detect_dangerous_command can report an earlier pattern first."""
+    for command_variant in _command_detection_variants(command):
+        command_lower = _lower_preserving_flags(command_variant)
+        for pattern_re, description in _REMOTE_EXEC_PATTERNS_COMPILED:
+            if pattern_re.search(command_lower):
+                return (True, description)
+    return (False, None)
