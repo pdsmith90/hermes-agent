@@ -16,6 +16,7 @@ import json
 import pytest
 
 import cron.scheduler as s
+from cron import delivery_queue
 from cron import scheduler_delivery as sched_delivery
 from cron import scheduler_preflight as sched_preflight
 from cron.scheduler import _resolve_delivery_targets
@@ -485,6 +486,70 @@ class TestOutcomeBookkeeping:
         assert self._outcome(run_env) == "queued"
         run_env["drain"](for_failure=False)
         assert [c["chat_id"] for c in run_env["send"]] == ["D0MAIN"]
+        assert self._outcome(run_env) == "delivered"
+
+
+class TestNoneLaneNeverEnqueued:
+    """``deliver: none`` resolves zero targets, so a queued row could only be booked "delivered"
+    for a send that never happened — the ledger over-credited every file-only LLM job
+    (2026-11-13: arxiv-research-scan and daily-trace-mining read delivered on every run)."""
+
+    @staticmethod
+    def _outcome(state):
+        assert state["finished"], "finish_execution never called"
+        return state["finished"][-1][1].get("delivery_outcome")
+
+    def test_success_on_none_lane_is_not_enqueued_and_reads_suppressed(
+        self, run_env, monkeypatch
+    ):
+        monkeypatch.setattr(s, "run_job", _succeeding_run_job())
+
+        s.run_one_job({"id": "n1", "name": "distill", "deliver": "none"})
+
+        assert run_env["send"] == []
+        assert delivery_queue.get_status("exec-t") is None
+        assert s.drain_delivery_queue(adapters={}, loop=None) == 0
+        assert self._outcome(run_env) == "suppressed"
+
+    def test_failed_none_lane_without_failure_deliver_reads_suppressed(
+        self, run_env, monkeypatch
+    ):
+        """No failure lane and no targets: nothing was announced, so the row must not say it was."""
+        monkeypatch.setattr(s, "run_job", _failing_run_job())
+
+        s.run_one_job({"id": "n2", "name": "scan", "deliver": "none"})
+
+        assert run_env["send"] == []
+        assert delivery_queue.get_status("exec-t") is None
+        assert self._outcome(run_env) == "suppressed"
+        args, _kw = run_env["marked"][0]
+        assert args[0] == "n2" and args[1] is False, "the failure is still recorded"
+
+    def test_failed_none_job_with_failure_deliver_origin_is_still_enqueued(
+        self, run_env, monkeypatch
+    ):
+        """A failed file-only job that routes failures to origin still sends its failure notice."""
+        monkeypatch.setattr(s, "run_job", _failing_run_job())
+
+        s.run_one_job({
+            "id": "n3", "name": "distill", "deliver": "none", "failure_deliver": "origin",
+            "origin": {"platform": "slack", "chat_id": "D0ORIGIN"},
+        })
+
+        run_env["drain"](for_failure=True)
+        assert [c["chat_id"] for c in run_env["send"]] == ["D0ORIGIN"]
+        assert self._outcome(run_env) == "delivered"
+
+    def test_origin_run_still_enqueues(self, run_env, monkeypatch):
+        monkeypatch.setattr(s, "run_job", _succeeding_run_job())
+
+        s.run_one_job({
+            "id": "n4", "name": "brief", "deliver": "origin",
+            "origin": {"platform": "slack", "chat_id": "D0ORIGIN"},
+        })
+
+        run_env["drain"](for_failure=False)
+        assert [c["chat_id"] for c in run_env["send"]] == ["D0ORIGIN"]
         assert self._outcome(run_env) == "delivered"
 
 

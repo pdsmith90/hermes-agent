@@ -4036,16 +4036,19 @@ def _save_compose_deliver(
 
     if not d.should_deliver:
         return
-    d.unresolved_origin = (
-        _normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)) == "origin"
-        and not _resolve_delivery_targets(job, for_failure=not d.success)
-    )
+    # The lane the notice is (or would be) routed through: failure_deliver on a failure (NS-788).
+    lane = _normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success))
+    d.unresolved_origin = lane == "origin" and not _resolve_delivery_targets(
+        job, for_failure=not d.success)
     execution_id = job.get('execution_id')
     if execution_id and not job.get('no_agent'):
         from cron.delivery_queue import enqueue
-        # Nothing to send: an origin-less job is ``not_configured``, never a queued "delivery".
-        if d.unresolved_origin or _normalize_deliver_value(
-                _delivery_lane_value(job, for_failure=not d.success)) == "local":
+        # Nothing to send: an origin-less job is ``not_configured``, and ``local``/``none`` are an
+        # explicit no-delivery choice — never a queued "delivery". A queued ``none`` run resolved zero
+        # targets, so the drain booked the row "delivered" and the ledger copied that, over-crediting
+        # every file-only LLM job (2026-11-13: arxiv-research-scan, daily-trace-mining). ``none`` is
+        # already what the classifier records for these runs; this stops the enqueue from overriding it.
+        if d.unresolved_origin or lane in ("local", "none"):
             return
         queued_job = dict(job)
         if d.failure_incident_id:
