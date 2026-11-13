@@ -221,6 +221,23 @@ class TestProseCheckPure:
         problems, _ = _prose_check(resp, _rows(3900), [], [], [], [])
         assert problems == []
 
+    @pytest.mark.parametrize("measure", [
+        "Flicker 194→2 / 249→2 pairs",
+        "flicker drops 194→2 pairs, max jump 6.5→1.9 dex",
+    ])
+    def test_a_measurement_before_an_arrow_is_not_an_id(self, measure):
+        # 2026-11-13 memory-verify: the frame-fix note's "194→2 pairs" (a flicker count) was read as the
+        # claim "→ 194". A bare number before an arrow is a fid only when the target has an id's shape
+        # (3+ digits) or a decimal point; a fid token or "trust" still admits any number.
+        resp = f"fid 2264: verified — source note confirms the union mask, {measure}."
+        problems, _ = _prose_check(resp, [], [], [], [], [], job_name="memory-verify")
+        assert problems == []
+
+    @pytest.mark.parametrize("claim", ["fid 194 → merged", "fact 194 -> demoted", "3381 → 3391 superseded"])
+    def test_a_named_fid_beside_an_arrow_is_still_a_claim(self, claim):
+        problems, _ = _prose_check(claim, [], [], [], [], [])
+        assert len(problems) == 1 and "recorded no such write" in problems[0]
+
     @pytest.mark.parametrize("claim", ["promoted 3381 → memory-entry 3391", "fid 3517 → fid 3495",
                                        "3381 → 3391 superseded", "fid 619 → 577 chars"])
     def test_an_arrow_that_only_looks_like_a_unit_change_is_still_a_claim(self, claim):

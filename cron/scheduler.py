@@ -3031,9 +3031,13 @@ _PROSE_CLAIM_COLON = re.compile(
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\s*:\s*(?P<ids>{_PROSE_BARE_LIST})(?![\d.])", re.I)
 # What an arrow claim points AT: an id or a number (a merge, a promotion, a trust value) or a verdict,
 # status or category word. "fid 3507 → <a project name>" (2026-10-10 dream) traced where an idea came from
-# (cron review #166).
+# (cron review #166). A bare number (no fid token, no "trust") must look like an id — 3+ digits — or be a
+# decimal, or the arrow is a measurement: "Flicker 194→2 / 249→2 pairs, max jump 6.5→1.9 dex"
+# (2026-11-13 memory-verify, a frame-fix note) was read as the claim "→ 194". "fid 2015 → demoted" and
+# "fid 3326 → 0.55" keep a fid token, so any number is still a claim there.
 _PROSE_ARROW_TARGET = (
-    rf"(?:trust\s*)?(?:{_PROSE_FID_TOKEN})?\.?\d|(?:{_PROSE_CLAIM_VERBS}|researched|confirmed|refuted|"
+    rf"(?:{_PROSE_FID_TOKEN}|trust\s*[=:#]?\s*)\.?\d|\d{{3,6}}(?!\d|\.\d)|\.?\d*\.\d+"
+    rf"|(?:{_PROSE_CLAIM_VERBS}|researched|confirmed|refuted|"
     r"partially[- ]confirmed|inconclusive|superseded|retired|parked|resolved|designed?|archived|invalidated|"
     r"attempted(?:-once)?|blocked-local|tagged|helpful|unhelpful|substituted|memory-entry|synthesis|lesson|"
     r"project|paper|activity|open-question|hypothesis|tool|general|outage|user_pref)\b"
