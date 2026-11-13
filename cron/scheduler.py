@@ -3043,8 +3043,11 @@ _PROSE_ARROW_TARGET = (
     r"project|paper|activity|open-question|hypothesis|tool|general|outage|user_pref)\b"
 )
 # "3274/3275/3276 → researched", "fid 3273 -> demoted": ids right before an arrow into a write's result
+# (?<!\d,): "10,542→185" is a count with a thousands separator, not the id 542 (2026-11-13 memory-verify,
+# a cell-jump measurement). The lookbehind guards the START of the bare list only, so "3381, 3391 → merged"
+# still claims both ids, and a fid token is unaffected ("fid 3381, 3391 → merged").
 _PROSE_CLAIM_AFTER = re.compile(
-    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-]){_PROSE_NOT_AFTER_OPERATOR}(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)"
+    rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-])(?<!\d,){_PROSE_NOT_AFTER_OPERATOR}(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)"
     rf"(?=\s*(?:{_PROSE_ARROW_TARGET}))", re.I)
 # "3371→3375→3377": three or more ids joined by arrows trace a lineage, not a write — the 10-07
 # consolidate report named such a chain while judging it "not duplicates". Blanked before the arrow
