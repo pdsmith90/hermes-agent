@@ -253,6 +253,12 @@ docs/superpowers/*
 /backups/
 /vault.key
 /vault.json.enc
+# Credential files wherever they land (the rooted rules above only cover the
+# checkout root; these catch a copy dropped into a subdirectory). `.gitignore`
+# cannot untrack an already-tracked file — `git rm --cached` is the only fix.
+credentials.json
+auth*.json
+*.key
 
 # Persistent dev sandbox dir (scripts/dev-sandbox.sh --persistent)
 .hermes-sandbox/
