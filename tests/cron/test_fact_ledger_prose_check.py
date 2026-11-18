@@ -299,6 +299,12 @@ class TestProseCheckPure:
         '- fid 3853 (3d, provider-health/Gemini attribution): no stored fact answers it; '
         'fid 3832 confirms "not done" → left open.',
         "never created fid 3833; not updated fid 3834",
+        # 2026-11-17 daily-review: "None added — fid 4416"
+        "PART D — Open question\nNone added — fid 4416 (Antigravity baseline) remains the active open question",
+        # 2026-11-18 daily-review: "No lessons stored today — fid 1208"
+        "No lessons stored today — fid 1208 covers the Telegram cluster",
+        "- No new lessons stored today — fid 1208 covers it",
+        "PART C — Open questions:\nNo open questions queued — fid 1234 remains open",
     ])
     def test_a_verb_after_in_or_a_negated_verb_names_existing_facts(self, resp):
         problems, _ = _prose_check(resp, [], [], [], [], [])

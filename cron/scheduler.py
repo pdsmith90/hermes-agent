@@ -2992,7 +2992,7 @@ _PROSE_REFERENCE = r"(?<![\w-])(?:to\s+(?:reference|cite|point\s+(?:at|to))|refe
 _PROSE_BRANCHES = r"(?:main|master|trunk|pds|dev|develop|upstream|origin)"
 _PROSE_CLAIM_BEFORE = re.compile(
     rf"(?<!already[\s-])(?<!previously[\s-])(?<!originally[\s-])(?<!self-)(?<!\bin\s)(?<!\bby\s)(?<!\bagainst\s)"
-    rf"(?<!\bno\s)(?<!\bnot\s)(?<!\bnever\s)"
+    rf"(?<!\bno\s)(?<!\bnone\s)(?<!\bnot\s)(?<!\bnever\s)"
     rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\b"
     rf"(?!\s+{_PROSE_DERIVED_NOUNS}\s+of\b)"
     rf"(?!\s+(?:to|into|onto)\s+{_PROSE_BRANCHES}\b)"
@@ -3001,6 +3001,16 @@ _PROSE_CLAIM_BEFORE = re.compile(
     rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})"
     rf"|(?<![\w./-])(?P<bare>\d{{3,6}}(?!\d|-\d)(?:\s*(?:[,/]|and|&)\s*\d{{3,6}}(?!\d|-\d))*)(?=\s+{_PROSE_REFERENCE}))",
     re.I)
+# A clause whose subject denies any writes ("No lessons stored today — fid 1208", "None added — fid 4416",
+# "No new questions queued — fid 1234") negates the verb (2026-11-18 review #276). The clause opens at
+# a line start (with optional bullet) or after punctuation (; : . ! ? — – \n |) and starts with a negation
+# (no, none, zero, never, not) followed by up to 3 words before the claim verb.
+_PROSE_NEGATED_CLAUSE = re.compile(
+    rf"(?:^[ \t]*(?:(?:[-*+]|\d{{1,2}}[.)])[ \t]+)?|[;:.!?—–\n|][ \t]*)"
+    rf"\b(?:no|none|zero|never|not)\b"
+    rf"(?:[ \t]+\w+){{0,3}}[ \t]+"
+    rf"\b(?P<neg_verb>{_PROSE_CLAIM_VERBS})\b",
+    re.IGNORECASE | re.MULTILINE)
 # A clause whose subject is another session, named by its trace or session id, narrates that session's
 # write: "corpus-build (3f2a9c1d7b04) recovered from the approval block and stored fact 3997" (2026-10-25
 # weekly-trace-mining, cron review #215; fid 3997 was written on 10-23). Only the subject position
@@ -3193,10 +3203,15 @@ def _prose_check(response: str, created, created_gone, updated, removed, feedbac
         unchained = _PROSE_UNIT_CHANGE.sub(" ", _PROSE_SETTING_CHANGE.sub(" ", _PROSE_AUTHOR_YEAR.sub(
             " ", _blank_lineage_pairs(_PROSE_ID_CHAIN.sub(" ", unquoted)))))
         other_session = [s.span() for s in _PROSE_OTHER_SESSION.finditer(unquoted)]
+        negated_verbs = {m.end(): m.group("neg_verb").lower() for m in _PROSE_NEGATED_CLAUSE.finditer(unquoted)}
         for rx in (_PROSE_CLAIM_BEFORE, _PROSE_CLAIM_COLON, _PROSE_CLAIM_AFTER):
             for m in rx.finditer(unchained if rx is _PROSE_CLAIM_AFTER else unquoted):
-                if rx is _PROSE_CLAIM_BEFORE and any(a <= m.start() and m.end() <= b for a, b in other_session):
-                    continue
+                if rx is _PROSE_CLAIM_BEFORE:
+                    if any(a <= m.start() and m.end() <= b for a, b in other_session):
+                        continue
+                    verb_end = m.start() + len(m.group("verb"))
+                    if negated_verbs.get(verb_end) == m.group("verb").lower():
+                        continue
                 ids = m.groupdict().get("ids") or m.groupdict().get("bare") or ""
                 for tok in re.findall(r"\d{1,6}", ids):
                     claimed.setdefault(int(tok), m.group("verb").lower())
