@@ -486,6 +486,19 @@ class TestProseCheckPure:
         problems, _ = _prose_check(resp, [], [], [], [], [])
         assert problems == []
 
+    @pytest.mark.parametrize("line", [
+        # 2026-11-19 consolidate-synthesize (cron review #278), word for word:
+        # category token before target id in parenthesised lineage pair
+        "- already resolved earlier by fid 4827: Hocke & Schlegel citation (fid 4690 → LESSON 4827)",
+        "- already resolved earlier by fid 4828: experiment prioritization (fid 4725 → LESSON 4828)",
+        "- already resolved earlier by fid 4826: model evaluation campaign misattribution (fid 4813 → LESSON 4826)",
+        # comma-separated list of pairs inside parens on a line that names resolved/resolution
+        "- Closed: 3 items resolved earlier by antigravity-client (fids 4690→4827, 4725→4828, 4813→4826).",
+    ])
+    def test_parenthesised_category_pair_or_comma_list_on_resolved_line_is_lineage(self, line):
+        problems, _ = _prose_check(line, [], [], [], [], [])
+        assert problems == []
+
     @pytest.mark.parametrize("claim", [
         "Then merged 4440 → 4441 chain members into one.",
         "fid 4440 → fid 4441 superseded tonight.",

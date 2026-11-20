@@ -789,7 +789,7 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
                 delivery = str(row.get("delivery") or "not recorded").lower()
                 issue = str(row.get("issue") or "details in hermes cron runs")
                 if status in ("failed", "unknown") and not any(
-                    re.search(r"\b(error|failed|failure|blocked|unavailable|unknown)\b", line, re.I)
+                    re.search(r"\b(error|failed|failure|blocked|unavailable|unknown)\b", line, re.IGNORECASE)
                     for line in matching_lines
                 ):
                     gaps.append(
@@ -798,7 +798,7 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
                     )
                 if delivery in ("failed", "unknown", "not_configured") and not any(
                     "deliver" in line.casefold()
-                    and re.search(r"\b(failed|failure|unknown|not configured|unresolved)\b", line, re.I)
+                    and re.search(r"\b(failed|failure|unknown|not configured|unresolved)\b", line, re.IGNORECASE)
                     for line in matching_lines
                 ):
                     gaps.append(f"{name}: delivery={delivery}; job status={status}, but {unflagged}")
@@ -808,7 +808,7 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
                 # "false positive" is how #169 (2026-10-17) tells the briefing to carry a mismatch it
                 # verified, on the job's own line (2026-10-18, #174).
                 if mismatch and not any(
-                    re.search(r"\b(ledger|prose|mismatch|unreported|claims?|false[\s-]positives?)\b", line, re.I)
+                    re.search(r"\b(ledger|prose|mismatch|unreported|claims?|false[\s-]positives?)\b", line, re.IGNORECASE)
                     for line in matching_lines
                 ):
                     gaps.append(f"{name}: ledger/prose mismatch — {str(mismatch)[:200]}; {unflagged}")
@@ -830,7 +830,7 @@ def _enforce_morning_briefing_coverage(job: dict, prompt: str, final_response: s
             fact_id = str(correction.get("fact_id") or "")
             correction_already_reported = any(
                 "correction" in line.casefold()
-                and re.search(rf"\bfid\s*[=:]?\s*{re.escape(fact_id)}\b", line, re.I)
+                and re.search(rf"\bfid\s*[=:]?\s*{re.escape(fact_id)}\b", line, re.IGNORECASE)
                 for line in response_lines
             )
             if not correction_already_reported:
@@ -3000,7 +3000,7 @@ _PROSE_CLAIM_BEFORE = re.compile(
     rf"(?:(?!{_PROSE_REFERENCE}\s+(?:{_PROSE_FID_TOKEN})?\d)[^.\n\"“”]){{0,25}}?"
     rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})"
     rf"|(?<![\w./-])(?P<bare>\d{{3,6}}(?!\d|-\d)(?:\s*(?:[,/]|and|&)\s*\d{{3,6}}(?!\d|-\d))*)(?=\s+{_PROSE_REFERENCE}))",
-    re.I)
+    re.IGNORECASE)
 # A clause whose subject denies any writes ("No lessons stored today — fid 1208", "None added — fid 4416",
 # "No new questions queued — fid 1234") negates the verb (2026-11-18 review #276). The clause opens at
 # a line start (with optional bullet) or after punctuation (; : . ! ? — – \n |) and starts with a negation
@@ -3026,7 +3026,7 @@ _PROSE_HEX_ID = r"(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{12,64}\b"
 _PROSE_OTHER_SESSION = re.compile(
     rf"(?:^[ \t]*(?:(?:[-*+]|\d{{1,2}}[.)])[ \t]+)?|[;:.!?][ \t]+)"
     rf"(?:[\w./-]+[ \t]+\({_PROSE_HEX_ID}\)|[Tt]race[ \t]+{_PROSE_HEX_ID}|[Ss]ession[ \t]+{_PROSE_HEX_ID})"
-    r"(?:(?!\b(?:I|[Ww]e|[Mm]e|[Mm]y|[Oo]ur|[Tt]hen|[Ss]o)\b|[ \t]-[ \t])[^,;:.!?—–→>()|\"“”\n])*", re.M)
+    r"(?:(?!\b(?:I|[Ww]e|[Mm]e|[Mm]y|[Oo]ur|[Tt]hen|[Ss]o)\b|[ \t]-[ \t])[^,;:.!?—–→>()|\"“”\n])*", re.MULTILINE)
 # A double-quoted span on one line is a quotation of some other text (a fact, a note, a log line), so
 # a claim verb inside it states nothing this run did. Emptied before every claim rule runs ("" stays,
 # so a verb BEFORE the quotation still cannot reach a fid after it); capped at 300 chars and one line so
@@ -3038,7 +3038,7 @@ _PROSE_QUOTED = re.compile(r"\"[^\"\n]{1,300}\"|“[^“”\n]{1,300}”")
 _PROSE_NOT_AFTER_OPERATOR = r"(?<![=≈~≤≥±×])(?<![=≈~≤≥±×]\s)"
 # "Retired: 3275, 3276", "Designed: 3328": verb, colon, bare ids
 _PROSE_CLAIM_COLON = re.compile(
-    rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\s*:\s*(?P<ids>{_PROSE_BARE_LIST})(?![\d.])", re.I)
+    rf"\b(?P<verb>{_PROSE_CLAIM_VERBS})\s*:\s*(?P<ids>{_PROSE_BARE_LIST})(?![\d.])", re.IGNORECASE)
 # What an arrow claim points AT: an id or a number (a merge, a promotion, a trust value) or a verdict,
 # status or category word. "fid 3507 → <a project name>" (2026-10-10 dream) traced where an idea came from
 # (cron review #166). A bare number (no fid token, no "trust") must look like an id — 3+ digits — or be a
@@ -3058,30 +3058,38 @@ _PROSE_ARROW_TARGET = (
 # still claims both ids, and a fid token is unaffected ("fid 3381, 3391 → merged").
 _PROSE_CLAIM_AFTER = re.compile(
     rf"(?:{_PROSE_FID_TOKEN}(?P<ids>{_PROSE_ID_LIST})|(?<![\w./-])(?<!\d,){_PROSE_NOT_AFTER_OPERATOR}(?P<bare>{_PROSE_BARE_LIST}))\s*(?P<verb>→|->)"
-    rf"(?=\s*(?:{_PROSE_ARROW_TARGET}))", re.I)
+    rf"(?=\s*(?:{_PROSE_ARROW_TARGET}))", re.IGNORECASE)
 # "3371→3375→3377": three or more ids joined by arrows trace a lineage, not a write — the 10-07
 # consolidate report named such a chain while judging it "not duplicates". Blanked before the arrow
 # rule runs; two ids ("promoted 3381 → memory-entry 3391") stay a claim.
 _PROSE_ID_CHAIN = re.compile(
-    rf"(?<![\w./-])(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}){{2,}}(?![\d.])", re.I)
+    rf"(?<![\w./-])(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}){{2,}}(?![\d.])", re.IGNORECASE)
 # "the audit pair (fid 3523 → fid 3524)", "superseded pairs (3125→3126, 3156→3157)": id pairs a
 # lineage word introduces name which fact superseded which (2026-10-11 consolidate, cron review #166).
 # Blanked before the arrow rule runs, like a chain; a bare "fid 3517 → fid 3495" merge stays a claim.
 # "The OpenCode timeout chain (4071→4013/4062) was already handled" (2026-10-26 consolidate, cron review
 # #218) named one correction fact and the two it corrects: "chain" is a lineage word, and the right side
 # of a pair may be a "/" list. A pair may end a sentence: only a decimal ("3126.5") stops it.
-_PROSE_LINEAGE_WORD = r"\b(?:pairs?|chains?|supersed\w*|supersession|lineage)\b"
+# A lineage word names a relationship between existing facts (supersession, pairing, chain, resolution)
+# rather than a new store write (2026-10-11 review #166; 2026-11-20 review #278).
+_PROSE_LINEAGE_WORD = r"\b(?:pairs?|chains?|supersed\w*|supersession|lineage|resolv\w*|resolutions?)\b"
 # A short count of the chain's members may sit between the lineage word and the pair: "The
 # supersession chain across 4 facts (4229→4232)" (2026-11-01 consolidate) was read as the claim
 # "→ 4229" because the digit blocked the 25-char gap. The gap AFTER the count is 3 characters, so
 # the pair must follow the count almost directly ("(", ", ", a dash): "… chain across 4 facts
 # stored 4229 → 4232" states a write and stays a claim.
 _PROSE_LINEAGE_COUNT = r"\d{1,3}[ \t]+(?:fids?|facts?|ids?)[^\d\n]{0,3}"
-_PROSE_PAIR = (rf"(?:{_PROSE_FID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}"
-               rf"(?:\s*/\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}})*(?!\d|\.\d)")
+# An id or an uppercase/lowercase category token ("LESSON 4827", "open-question 4690") before an id
+# in a lineage pair (2026-11-20 review #278).
+_PROSE_CATEGORY_TOKEN = (
+    r"(?:LESSON|PROJECT|RESEARCHED|PAPER|SYNTHESIS|ACTIVITY|OPEN[- ]QUESTION|TOOL|GENERAL|MEMORY[- ]ENTRY)\s+"
+)
+_PROSE_PAIR_ID_TOKEN = rf"(?:{_PROSE_FID_TOKEN}|{_PROSE_CATEGORY_TOKEN})"
+_PROSE_PAIR = (rf"(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}}\s*(?:→|->)\s*(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}}"
+               rf"(?:\s*/\s*(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}})*(?!\d|\.\d)")
 _PROSE_LINEAGE_PAIRS = re.compile(
     rf"{_PROSE_LINEAGE_WORD}[^\d\n]{{0,25}}(?:{_PROSE_LINEAGE_COUNT})?{_PROSE_PAIR}"
-    rf"(?:\s*[,;]\s*{_PROSE_PAIR})*", re.I)
+    rf"(?:\s*[,;]\s*{_PROSE_PAIR})*", re.IGNORECASE)
 # The same pairs as a list under a header that names the lineage (2026-10-20 consolidate, cron review
 # #201): "Superseded chains already handled by store:" then "- 3837 → 3839 (spline push status)". The
 # header must introduce the list (a line ending in ":", or a markdown heading), and only a bullet that
@@ -3094,7 +3102,7 @@ _PROSE_LINEAGE_HEADER = re.compile(
 _PROSE_BULLET = re.compile(r"[ \t]*(?:[-*+]|\d{1,2}[.)])[ \t]+\S")
 _PROSE_LINEAGE_BULLET = re.compile(
     rf"[ \t]*(?:[-*+]|\d{{1,2}}[.)])[ \t]+(?P<pair>{_PROSE_PAIR}"
-    rf"(?:\s*(?:→|->)\s*(?:{_PROSE_FID_TOKEN})?\d{{3,6}}(?![\d.]))*)", re.IGNORECASE)
+    rf"(?:\s*(?:→|->)\s*(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}}(?![\d.]))*)", re.IGNORECASE)
 
 
 # A parenthesised pair on a line that names a lineage says which fact superseded which, wherever it
@@ -3102,18 +3110,22 @@ _PROSE_LINEAGE_BULLET = re.compile(
 # reassessment (4440 → 4441)" (2026-11-06 consolidate-synthesize, cron review #260) put the pair 28
 # characters after "chain", past the 25-char gap above, and it was read as the claim "→ 4440". A claim
 # verb leading into the parenthesis states a write: "… were merged (4440 → 4441)" stays a claim.
+# A comma-separated list of pairs inside the parens ("fids 4690→4827, 4725→4828, 4813→4826", 2026-11-20
+# review #278) blanks as one group.
 _PROSE_LINEAGE_LINE = re.compile(_PROSE_LINEAGE_WORD, re.IGNORECASE)
-_PROSE_PAREN_PAIR = re.compile(rf"\((?P<pair>{_PROSE_PAIR})\)", re.IGNORECASE)
+_PROSE_PAREN_PAIR = re.compile(rf"\((?P<pair>{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*)\)", re.IGNORECASE)
 _PROSE_VERB_INTO_PAREN = re.compile(rf"\b(?:{_PROSE_CLAIM_VERBS})\b[^\d\n(]{{0,25}}$", re.IGNORECASE)
 # A pair right before a lineage noun names that lineage: "fid 4500 → fid 4531 supersession was already
 # resolved earlier by the antigravity-client session" (2026-11-09 consolidate-synthesize) was read as the
 # claim "→ 4500". Nouns only: "3381 → 3391 superseded" reports a result and stays a claim, and a claim
 # verb leading into the pair states a write as above: "merged 4440 → 4441 chain" stays a claim.
 _PROSE_PAIR_BEFORE_LINEAGE = re.compile(
-    rf"(?P<pair>{_PROSE_PAIR})[ \t()]{{0,3}}\b(?:pairs?|chains?|supersessions?|lineage)\b", re.IGNORECASE)
+    rf"(?P<pair>{_PROSE_PAIR})[ \t()]{{0,3}}\b(?:pairs?|chains?|supersessions?|lineage|resolutions?)\b", re.IGNORECASE)
 
 
-def _blank_paren_pairs(line: str, rx: re.Pattern = _PROSE_PAREN_PAIR) -> str:
+def _blank_paren_pairs(line: str, rx: Optional[re.Pattern] = None) -> str:
+    if rx is None:
+        rx = _PROSE_PAREN_PAIR
     out, pos = [], 0
     for m in rx.finditer(line):
         if _PROSE_VERB_INTO_PAREN.search(line[:m.start()]):
@@ -3154,7 +3166,7 @@ _PROSE_AUTHOR_YEAR = re.compile(
 # a value change, not a write (2026-10-17 memory-verify, cron review #168). Blanked before the arrow rule
 # runs, like a chain. fact_id is a fid token, not a setting: "fact_id 3381 → 3391" stays a claim.
 _PROSE_SETTING_CHANGE = re.compile(
-    r"\b(?!fact_ids?\b)[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*:?\s+\d+\s*(?:→|->)\s*\d+", re.I)
+    r"\b(?!fact_ids?\b)[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]*:?\s+\d+\s*(?:→|->)\s*\d+", re.IGNORECASE)
 # "619→577 chars", "4096 -> 8192 tokens", "61→57%": a size or percentage change, not a write (2026-10-21
 # daily-review and consolidate-synthesize reading a fact_store repair log line). Blanked before the
 # arrow rule runs, like a chain. The lookahead after the unit keeps the bare "s" from swallowing a
@@ -3162,7 +3174,7 @@ _PROSE_SETTING_CHANGE = re.compile(
 _PROSE_UNIT_CHANGE = re.compile(
     r"(?<![\w./-])(?<!fid\s)(?<!fids\s)(?<!fid=)(?<!fact\s)"
     r"\d{1,6}\s*(?:→|->)\s*\d{1,6}\s*"
-    r"(?:(?:chars?|characters?|tokens?|bytes?|lines?|ms|s|[KMG]i?B)(?![\w])|%)", re.I)
+    r"(?:(?:chars?|characters?|tokens?|bytes?|lines?|ms|s|[KMG]i?B)(?![\w])|%)", re.IGNORECASE)
 # Jobs whose report is ABOUT other jobs' writes: their claim verbs name facts they never touched.
 _PROSE_CHECK_REPORTERS = frozenset({"morning-briefing"})
 
@@ -3483,7 +3495,7 @@ def run_job(
                         f"out after {int(_REPORT_GATE_TIMEOUT_S)}s — {_kept_label} kept"
                     )
                     break
-                except Exception as _gate_exc:  # noqa: BLE001 — never take the run down
+                except Exception as _gate_exc:
                     logger.warning("Job '%s': report-gate follow-up failed: %s", job_name, _gate_exc)
                     _gate_note = (
                         f"fired (marker \"{_gate_marker}\" missing); {_nth} failed "
