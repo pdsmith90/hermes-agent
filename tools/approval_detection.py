@@ -356,19 +356,21 @@ def _contains_shell_carrier(command: str) -> bool:
     )
 
 
-def _mask_quoted_prose(command: str) -> str:
+def _mask_quoted_prose(command: str, comments: bool = False) -> str:
     """Blank out quoted string CONTENT for positionless hardline matching (detection-only).
     Quote characters stay; inside double quotes `$(...)` and backtick spans are kept RAW because
     the shell really executes them. An unclosed quote masks to end-of-string, which cannot hide a
-    runnable command (the shell would not run it either).
+    runnable command (the shell would not run it either). With *comments*, a comment keeps only its
+    `#` and a quote character inside it opens nothing (`# don't` before the next line).
 
     Detection-only rewrite used by the quote-masked hardline rules (redirect-to-block-device, fork bomb):
     text inside single or double quotes is data the shell passes as an argument, so `echo "cat f >
     /dev/sda"` must not trip the unconditional floor (#93392). Unquoted text is untouched.
     """
     return "".join(
-        command[i:j] if quote is None or kind in ("quote", "subst") else " " * (j - i)
-        for kind, i, j, quote in _scan_shell(command, subst="q", naive_backtick=True)
+        "#" + " " * (j - i - 1) if kind == "comment"
+        else command[i:j] if quote is None or kind in ("quote", "subst") else " " * (j - i)
+        for kind, i, j, quote in _scan_shell(command, subst="q", naive_backtick=True, comments=comments)
     )
 
 
@@ -483,7 +485,7 @@ def _detect_hardline_command(command: str) -> tuple:
 
 
 # Fork (2026-10-23 review): what may stand between the pipe and the program that runs it.
-# `curl … | sudo bash`, `| env python3`, `| timeout 60 python3`, `|& python3`, `| (python3)` run the
+# `curl … | sudo bash`, `| env python3`, `| timeout 60 python3`, `|& python3`, `| (python3)`, `| { python3; }` run the
 # remote text exactly as `| bash` / `| python3` do; the rules below missed every one of them once the
 # tirith scanner was gone. A wrapper may carry up to six option/value tokens (`sudo -u root -E`).
 # A closing paren ends a shell's name only after an opening one (`| (sh)`), so a grep alternation
@@ -491,7 +493,7 @@ def _detect_hardline_command(command: str) -> tuple:
 # same reason ("(curl|python3|llama)", the 60-day cron replay's one false hit).
 _REMOTE_PIPE_WRAPPERS_RE = (r"(?:sudo|doas|env|nohup|nice|ionice|stdbuf|command|exec|time|timeout|setsid|"
                              r"chronic|unbuffer|busybox)")
-_PIPE_INTO = rf"\|&?\s*(?P<sub>\(\s*)?(?:{_REMOTE_PIPE_WRAPPERS_RE}\b(?:\s+[^\s|;&()]+){{0,6}}?\s+)?(?:[/\w.-]*/)?"
+_PIPE_INTO = rf"\|&?\s*(?P<sub>\(\s*|\{{\s+)?(?:{_REMOTE_PIPE_WRAPPERS_RE}\b(?:\s+[^\s|;&()]+){{0,6}}?\s+)?(?:[/\w.-]*/)?"
 _PIPE_SHELLS_RE = rf"(?:{_SHELL_NAMES_RE}|fish|ash|mksh|csh|tcsh)"
 # Interpreters that execute a program read from stdin when given no script: no argument but options,
 # or `-` / `/dev/stdin` as the script (anything after it is the program's argv).
@@ -558,16 +560,13 @@ class _PipeRemoteToInterpreterMatcher:
             return None
         if match := _PipeRemoteToShellMatcher._scan(text, fetch.end(), self._SINK, _PIPE_OPERATOR_RE, lookup_guard=False):
             return match
-        # A line break or `#` ends the stage only where the shell reads it: inside quotes it is text
-        # (`echo "curl … | python3 # x"`). Masking keeps offsets, so the same index can be checked.
-        pos, masked = fetch.end(), None
-        while match := _PipeRemoteToShellMatcher._scan(text, pos, self._STAGE_END_SINK, _PIPE_OPERATOR_RE,
-                                                       lookup_guard=False):
-            masked = masked if masked is not None else _mask_quoted_prose(text)
-            if masked[match.end() - 1] == text[match.end() - 1]:
-                return match
-            pos = match.end()
-        return None
+        # A line break or `#` ends the stage only where the shell reads it: inside quotes or a comment it is
+        # text (`echo "curl … | python3 # x"`, `ls # a | python3` then a newline), and a quote inside a comment
+        # opens nothing (`# it's` on the line before). The stage is read on that masked copy, which keeps offsets.
+        if not any(char in text for char in "\n#"):
+            return None
+        return _PipeRemoteToShellMatcher._scan(_mask_quoted_prose(text, comments=True), fetch.end(),
+                                               self._STAGE_END_SINK, _PIPE_OPERATOR_RE, lookup_guard=False)
 
 
 # ---- Dangerous command patterns -----------------------------------------------------------
@@ -2129,14 +2128,37 @@ _REMOTE_EXEC_PATTERNS_COMPILED = [
 # The floor splices each carried command in place of the command that carries it and reads the result again
 # (_carried_command_text), so the rules see the carried text as code and a pipe into the carrier still feeds it
 # (`curl … | ssh host sh`). Shell -c strings and eval code take part only so a carrier inside them is found.
-# Argv carriers run the argv after their subcommand or `--`; the program is the first word that names a shell,
-# an interpreter, a wrapper or another carrier (`docker exec -u root c sh -c …`), or the word after `--`.
-_ARGV_CARRIERS = {"docker": "exec", "podman": "exec", "kubectl": "exec", "oc": "exec", "lxc": "exec",
-                  "incus": "exec", "nsenter": None, "unshare": None, "doas": None, "xargs": None}
+# Argv carriers run an argv: after their own options, and for a subcommand carrier after the subcommand and the
+# container, pod or instance it names, the next word is the program (`docker exec -u node c sh -c …` runs sh, in
+# a container c, as the user node), or the word after `--`. Each entry is (subcommand, short options that take a
+# value, long options that take a value, whether options may still follow the target as in kubectl's
+# `exec pod -c app -- sh`, short options that stand in for the target as podman's -l, --latest).
+_KUBECTL_LONG_OPTIONS_WITH_ARG = (
+    "--container", "--filename", "--namespace", "--context", "--cluster", "--user", "--server", "--kubeconfig",
+    "--as", "--as-group", "--as-uid", "--token", "--pod-running-timeout", "--request-timeout", "--cache-dir",
+    "--certificate-authority", "--client-certificate", "--client-key", "--tls-server-name", "--username",
+    "--password", "--profile", "--profile-output", "--v", "--vmodule")
+_LXC_LONG_OPTIONS_WITH_ARG = ("--cwd", "--env", "--group", "--mode", "--user", "--project")
+_ARGV_CARRIERS = {
+    "docker": ("exec", "euw", ("--env", "--env-file", "--user", "--workdir", "--detach-keys", "--index"), False, ""),
+    "podman": ("exec", "euw", ("--env", "--env-file", "--user", "--workdir", "--detach-keys", "--preserve-fd"),
+               False, "l"),
+    "kubectl": ("exec", "cfns", _KUBECTL_LONG_OPTIONS_WITH_ARG, True, ""),
+    "oc": ("exec", "cfns", _KUBECTL_LONG_OPTIONS_WITH_ARG, True, ""),
+    "lxc": ("exec", "", _LXC_LONG_OPTIONS_WITH_ARG, True, ""),
+    "incus": ("exec", "", _LXC_LONG_OPTIONS_WITH_ARG, True, ""),
+    "nsenter": (None, "tSGNW", ("--target", "--setuid", "--setgid", "--net-socket", "--wdns"), False, ""),
+    "unshare": (None, "SGRwl", ("--setuid", "--setgid", "--root", "--wd", "--load-interp", "--map-user",
+                                "--map-group", "--map-users", "--map-groups", "--propagation", "--setgroups",
+                                "--monotonic", "--boottime"), False, ""),
+    "doas": (None, "Cu", (), False, ""),
+    "xargs": (None, "adEILnPs", ("--arg-file", "--delimiter", "--max-lines", "--max-args", "--max-procs",
+                                 "--max-chars", "--process-slot-var"), False, ""),
+}
 _STRING_CARRIERS = frozenset({"ssh", "su", "runuser", "eval", *_SHELL_NAMES})
-_CARRIED_SHELL_NAMES = frozenset(_PIPE_SHELL_NAMES_RE.split("|"))
+# A shell inside a -c string or eval code is already read by the payload variants; only these need the splice.
 _MAY_NAME_CARRIER_RE = re.compile(
-    rf"(?<![\w.-])(?:{'|'.join(sorted({*_ARGV_CARRIERS, *_STRING_CARRIERS}))})(?![\w-])|\$'", re.IGNORECASE)
+    rf"(?<![\w.-])(?:{'|'.join(sorted({*_ARGV_CARRIERS, 'ssh', 'su', 'runuser'}))})(?![\w-])|\$'", re.IGNORECASE)
 # OpenSSH options that take a value (`-p 22`, `-oX=y`); -N, -s, -O and -W run no remote shell at all, -n and -f
 # give the remote command no stdin from this side.
 _SSH_OPTIONS_WITH_ARG = frozenset("BDEFIJLOPQRSWbceilmopw")
@@ -2146,7 +2168,16 @@ _SU_LONG_OPTIONS_WITH_ARG = ("--group", "--supp-group", "--shell", "--whitelist-
 # Carriers nest (`ssh a "ssh b '…'"`); each level is a full re-read. Deeper text that still names a fetch fails closed.
 _MAX_CARRIED_DEPTH = 4
 _CARRIED_DEPTH_DESCRIPTION = "fetch inside commands nested too deep to read (remote-exec floor)"
-_FETCH_HINT_RE = re.compile(r"curl|wget|\$['(]|`", re.IGNORECASE)
+# Text that may spell a fetch once normalized: the word itself, ANSI-C quoting a level down, or a literal echo or
+# printf substitution, the only kind the command-word deobfuscation resolves (`$(echo cu)rl`).
+_FETCH_HINT_RE = re.compile(r"curl|wget|\$'|(?:\$\(|`)\s*(?:echo|printf)\b", re.IGNORECASE)
+# The `eval` reading of a string carrier's words can only add the eval rule: a substitution that opens the code.
+_EVAL_READING_RE = re.compile(r"""\s*["']?\s*(?:\$\(|`)""")
+# A carried command that holds no fetch, no program a pipe could feed and no carrier changes nothing a floor rule
+# can see; a level whose splices are all like that is not read again (`ssh h "ssh h x; …; curl … | jq ."`).
+_CARRIED_MAY_MATTER_RE = re.compile(
+    rf"{_FETCH_HINT_RE.pattern}|{_MAY_NAME_CARRIER_RE.pattern}|(?<![\w.-])(?:{_PIPE_SHELLS_RE}|{_PIPE_INTERPRETERS_RE})"
+    r"(?![\w-])", re.IGNORECASE)
 
 
 def _carrier_words(text: str, start: int, end: int) -> list[tuple[int, int, str]]:
@@ -2202,80 +2233,141 @@ def _ssh_carried(values: list[str]) -> tuple[str, bool] | None:
     return " ".join(values[index:]) or remote or "sh", stdin
 
 
-def _su_carried(values: list[str]) -> str:
-    index = 0
+def _su_carried(values: list[str], runuser: bool) -> tuple[str | None, int | None]:
+    """``(command, None)``: the string su or runuser hands the target user's shell (its -c, or none: the shell
+    reads stdin). ``(None, index)``: `runuser -u USER` runs an argv instead, and *index* is its program word."""
+    index, user_mode, program = 0, False, None
     while index < len(values):
         value = values[index]
+        if value == "--":
+            program = index + 1 if program is None and index + 1 < len(values) else program
+            break
         if value.startswith("--") and len(value) > 2:
             option, equals, option_value = value.partition("=")
             # getopt_long takes any unambiguous prefix (`--comm`, `--se`).
             if "--command".startswith(option) or len(option) > 3 and "--session-command".startswith(option):
-                return option_value if equals else (values[index + 1] if index + 1 < len(values) else "")
-            index += 2 if not equals and any(long.startswith(option) for long in _SU_LONG_OPTIONS_WITH_ARG) else 1
-            continue
-        if value.startswith("-") and len(value) > 1:
+                return (option_value if equals else (values[index + 1] if index + 1 < len(values) else "")), None
+            user_mode = user_mode or runuser and len(option) > 3 and "--user".startswith(option)
+            index += 2 if not equals and (user_mode and "--user".startswith(option) or any(
+                long.startswith(option) for long in _SU_LONG_OPTIONS_WITH_ARG)) else 1
+        elif value.startswith("-"):  # a lone `-` is su's --login
             for k, char in enumerate(value[1:], start=1):
-                if char in _SU_OPTIONS_WITH_ARG:
+                if char in _SU_OPTIONS_WITH_ARG or runuser and char == "u":
                     option_value = value[k + 1:]
                     if not option_value:
                         index += 1
                         option_value = values[index] if index < len(values) else ""
                     if char == "c":
-                        return option_value
+                        return option_value, None
+                    user_mode = user_mode or char == "u"
                     break
-        index += 1
-    return "sh"  # no -c: the target user's shell reads its commands from stdin
+            index += 1
+        else:
+            # su takes options after its user name; runuser -u stops at the program (`runuser -u x python3 -c …`).
+            program = index if program is None else program
+            index += 1
+        if user_mode and program is not None:
+            break
+    if user_mode:
+        return None, program
+    return "sh", None  # no -c: the target user's shell reads its commands from stdin
 
 
-def _names_carried_program(value: str) -> bool:
-    name = os.path.basename(value).lower().removesuffix(".exe")
-    return (name in _CARRIED_SHELL_NAMES or name in _COMMAND_WRAPPER_WORDS or name in _ARGV_CARRIERS
-            or name in _STRING_CARRIERS or _interpreter_family(value) is not None)
+def _argv_carried_program(name: str, values: list[str]) -> int | None:
+    """Index of the program word an argv carrier runs, skipping its own options and their values."""
+    subcommand, short_with_arg, long_with_arg, interspersed, stands_for_target = _ARGV_CARRIERS[name]
+    index, need_target = 0, subcommand is not None
+    if need_target:
+        index = next((k + 1 for k, value in enumerate(values) if value == subcommand), len(values))
+    while index < len(values):
+        value = values[index]
+        if value == "--":
+            index += 2 if need_target and not interspersed else 1
+            break
+        if value.startswith("--"):
+            option, equals, _ = value.partition("=")
+            index += 2 if not equals and option in long_with_arg else 1
+            if option == "--latest" and stands_for_target:
+                need_target = False
+            continue
+        if value.startswith("-") and len(value) > 1:
+            for k, char in enumerate(value[1:], start=1):
+                need_target = need_target and char not in stands_for_target
+                if char in short_with_arg:
+                    index += int(k == len(value) - 1)  # the value is the next word
+                    break
+            index += 1
+            continue
+        if not need_target:
+            break
+        # The container, pod or instance; docker and podman stop reading their options there.
+        need_target, index = False, index + 1
+        if not interspersed:
+            break
+    return index if index < len(values) else None
 
 
-def _carried_splice(text: str, start: int, name: str) -> tuple[int, int, str] | None:
-    """``(start, end, replacement)`` that puts the command the carrier at *start* runs in its place, or None."""
+def _carried_splice(text: str, start: int, name: str) -> tuple[int, int, str, str | None] | None:
+    """``(start, end, replacement, alone)`` that puts the command the carrier at *start* runs in its place, or
+    None. *alone*, when set, is another reading of the carried command, read on its own."""
     all_words = _carrier_words(text, start, start + len(_shell_command_segment(text, start)))
     words = all_words[1:]
     values = [value for _, _, value in words]
+    program, alone = None, None
     if name in _ARGV_CARRIERS:
-        first = 0
-        if (subcommand := _ARGV_CARRIERS[name]) is not None:
-            first = next((k + 1 for k, value in enumerate(values) if value == subcommand), len(values))
-        tail = values[first:]
-        program = first + tail.index("--") + 1 if "--" in tail else next(
-            (first + k for k, value in enumerate(tail) if _names_carried_program(value)), len(values))
-        if program >= len(values):
+        program = _argv_carried_program(name, values)
+        if program is None:
             return None
-        # The program's own text stays as written; only the carrier and its options go. xargs feeds the
-        # program its argv, not its stdin, so a pipe into xargs does not reach the program.
-        return start, words[program][0], " \n" if name != "xargs" else " :\n"
-    if name == "ssh":
+    elif name == "ssh":
         carried = _ssh_carried(values)
     elif name in ("su", "runuser"):
-        carried = (_su_carried(values), True)
+        command, program = _su_carried(values, name == "runuser")
+        carried = (command, True) if command is not None else None
+        if command is None and program is None:
+            return None
     elif name == "eval":
         carried = (_eval_payload(values), True)
     else:
         found, payload = _bash_exec_payload(values)
         carried = (payload, True) if found else None
+    if program is not None:
+        # The program's own text stays as written; only the carrier and its options go. xargs feeds the
+        # program its argv, not its stdin, so a pipe into xargs does not reach the program.
+        return start, words[program][0], " \n" if name != "xargs" else " :\n", None
     if not carried or not carried[0]:
         return None
+    if name in ("ssh", "su", "runuser"):
+        # This side's shell expands a `$(…)` or backtick outside single quotes before the carrier sees its
+        # words, and the far shell runs the result: `su -c "$(curl …)"` is `eval "$(curl …)"`. Only that
+        # reading: framing the carried string as `sh -c` would make `curl … | ssh h 'cat > f'` run its input.
+        if _EVAL_READING_RE.match(carried[0]) and _FETCH_HINT_RE.search(_normalize_command_for_detection(carried[0])) \
+                and any(kind == "subst" for kind, *_ in _scan_shell(text, words[0][0], all_words[-1][1], subst="uq")):
+            alone = "eval " + carried[0]
     # The rules above already read a -c string or eval code as code; it is re-read only when a carrier may sit
     # inside, or when it spans lines (the payload variants above read its line breaks as spaces).
-    if name not in ("ssh", "su", "runuser") and "\n" not in carried[0] \
-            and not _MAY_NAME_CARRIER_RE.search(re.sub(r"[\\'\"]", "", carried[0])):
+    elif "\n" not in carried[0] and not _MAY_NAME_CARRIER_RE.search(re.sub(r"[\\'\"]", "", carried[0])):
         return None
     # Redirections after the last word stay in place: they still feed or take the carried command's streams.
-    return start, all_words[-1][1], (" \n" if carried[1] else " :\n") + carried[0]
+    return start, all_words[-1][1], (" \n" if carried[1] else " :\n") + carried[0], alone
+
+
+def _fold_line_continuations(text: str) -> str:
+    """*text* without the backslash-newlines the shell removes (not inside single quotes or a comment)."""
+    if "\\\n" not in text:
+        return text
+    return "".join("" if kind == "esc" and text[i + 1] == "\n" else text[i:j]
+                   for kind, i, j, _ in _scan_shell(text, comments=True))
 
 
 def _carried_command_text(command: str) -> tuple[str, list[str]]:
-    """*command* with each carried command spliced over its carrier, and the carried commands whose
-    quoting does not balance (read on their own: spliced, an open quote would swallow the text after it)."""
+    """*command* with each carried command spliced over its carrier, and texts read on their own: the
+    carried commands whose quoting does not balance (spliced, an open quote would swallow the text after
+    it) and the `eval` reading of a string carrier's words (_carried_splice)."""
     # Heredoc bodies that are data or another language's code hold no carrier; a body a shell runs stays.
-    text = expand_ansi_c_quotes(mask_heredoc_bodies_for_shell_scan(command, code_consumers=True))
-    edits, unbalanced, cursor = [], [], 0
+    # A line continuation can split a carrier's name or stand for a whole word (`| \` then `ssh h sh`).
+    text = _fold_line_continuations(expand_ansi_c_quotes(mask_heredoc_bodies_for_shell_scan(
+        command, code_consumers=True)))
+    edits, unbalanced, cursor, matters = [], [], 0, False
     # A carrier inside another one's text (`ssh a "ssh b …"`, `$(ssh …)` in an argument) is read at the next level.
     carriers = sorted((start, name) for start, _, word in _iter_shell_command_word_spans(text)
                       if (name := os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower()
@@ -2286,12 +2378,17 @@ def _carried_command_text(command: str) -> tuple[str, list[str]]:
         splice = _carried_splice(text, start, name)
         if splice is None:
             continue
+        if splice[3] is not None:
+            unbalanced.append(splice[3])
         if _shell_segment_tokens(splice[2], 0) is None:
             unbalanced.append(splice[2])
             continue
-        edits.append(splice)
+        edits.append(splice[:3])
         cursor = splice[1]
-    return (_splice(text, edits) if edits else command), unbalanced
+        # An argv carrier's replacement only drops the carrier: its command is the text after it.
+        carried = splice[2] if splice[2].strip(" :\n") else _shell_command_segment(text, splice[1])
+        matters = matters or bool(_CARRIED_MAY_MATTER_RE.search(re.sub(r"[\\'\"]", "", carried)))
+    return (_splice(text, edits) if matters else command), unbalanced
 
 
 def _detect_remote_exec(command: str, depth: int) -> tuple:
@@ -2301,7 +2398,7 @@ def _detect_remote_exec(command: str, depth: int) -> tuple:
             if pattern_re.search(command_lower):
                 return (True, description)
     spliced, unbalanced = _carried_command_text(command)
-    for text in dict.fromkeys((*((spliced,) if spliced != command else ()), *unbalanced)):
+    for text in dict.fromkeys((*unbalanced, *((spliced,) if spliced != command else ()))):
         # Every floor rule needs a fetch, so text that cannot spell one (outside comments) is not read again.
         code = "".join(text[i:j] for kind, i, j, _ in _scan_shell(text, comments=True) if kind != "comment")
         if not _FETCH_HINT_RE.search(_normalize_command_for_detection(code)):
