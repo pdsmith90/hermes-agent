@@ -510,6 +510,8 @@ _PIPE_INTERP_OPTS = r"(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*))*"
 # flagged, as every redirect was before this distinction existed. Redirects are matched possessively, so a
 # target cannot be cut short to step around the script check. A detection variant breaks the line after the
 # `&` of `2>&1`, so a target may follow its `&`, and an operator its target, across a line break.
+# With no redirect at all, a comment or a line break straight after the interpreter and its options ends the
+# stage the same way (`| python3 # note`, `| node` then a newline); a script word after them does not.
 _PIPE_OUT_OP = r"(?:\d?>>?\|?|&>>?)"
 _PIPE_OUT_TARGET = r"""(?:&\s*+)?(?:"[^"]*+"|'[^']*+'|[^\s<>|;&()"']++)"""
 _PIPE_OUT_REDIRECT = rf"[^\S\n]*+{_PIPE_OUT_OP}\s*+{_PIPE_OUT_TARGET}"
@@ -518,6 +520,7 @@ _PIPE_STDIN_PROGRAM = (r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)"
                        rf"|(?:{_PIPE_OUT_REDIRECT})*+[^\S\n]*+{_PIPE_OUT_OP}(?!\s*+{_PIPE_OUT_TARGET})"
                        rf"|(?:{_PIPE_OUT_REDIRECT})++(?![^\S\n]+(?!/dev/stdin(?:[\s;&|)]|$))[^\s\-;&|()<>#])"
                        r"|\s*$|\s*[;&)]|\s+\|)")
+_PIPE_STDIN_STAGE_END = r"(?:[^\S\n]*+\n|[^\S\n]++#)"
 # Fork (2026-11-20 review): an interpreter's own options, any of them, up to the first argument that is
 # not an option (the script): `-u`, `--project=.`, `-W ignore`. Unlike _PIPE_INTERP_OPTS this takes
 # -c/-e/-m too; the rule that uses it looks for the option whose VALUE is the remote text. No token
@@ -545,12 +548,25 @@ class _PipeRemoteToInterpreterMatcher:
     the tail from every fetch word: quadratic on a long `curl | curl | …`)."""
 
     _SINK = re.compile(rf"{_PIPE_INTO}{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}{_PIPE_STDIN_PROGRAM}", _RE_FLAGS)
+    _STAGE_END_SINK = re.compile(rf"{_PIPE_INTO}{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}{_PIPE_STDIN_STAGE_END}",
+                                 _RE_FLAGS)
 
     def search(self, text: str):
         fetch = _PIPE_FETCH_RE.search(text)
         if fetch is None:
             return None
-        return _PipeRemoteToShellMatcher._scan(text, fetch.end(), self._SINK, _PIPE_OPERATOR_RE, lookup_guard=False)
+        if match := _PipeRemoteToShellMatcher._scan(text, fetch.end(), self._SINK, _PIPE_OPERATOR_RE, lookup_guard=False):
+            return match
+        # A line break or `#` ends the stage only where the shell reads it: inside quotes it is text
+        # (`echo "curl … | python3 # x"`). Masking keeps offsets, so the same index can be checked.
+        pos, masked = fetch.end(), None
+        while match := _PipeRemoteToShellMatcher._scan(text, pos, self._STAGE_END_SINK, _PIPE_OPERATOR_RE,
+                                                       lookup_guard=False):
+            masked = masked if masked is not None else _mask_quoted_prose(text)
+            if masked[match.end() - 1] == text[match.end() - 1]:
+                return match
+            pos = match.end()
+        return None
 
 
 # ---- Dangerous command patterns -----------------------------------------------------------
