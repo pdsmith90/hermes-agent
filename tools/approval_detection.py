@@ -499,12 +499,28 @@ _OUT_REDIRECT = r"""\s*(?:\d?>>?|&>>?)&?\s*[^\s<>|;&()]+"""
 # -e "$(curl …)"`, `git commit -m 'catch python3 -c "$(curl …)"'`): the start of the text, of a line or
 # after a separator (the detection variants also put each command on its own line), then any VAR=value
 # assignments, one wrapper with a few arguments (`sudo -u root`, `env X=1`, `timeout 5`, `xargs`, `uv run`)
-# and a path.
-_CMD_START = (r"(?:^|[\n;&|({`]|\$\(|\b(?:then|do|else|elif|if|while|until)\s|!\s)\s*"
+# and a path. As in _CMDPOS, only the last newline of a whitespace run starts a command and the run is
+# consumed possessively: trying every newline of a long blank-line run rescanned it once per newline.
+_CMD_START = (r"(?:^|\n(?![^\S\n]*+\n)|[;&|({`]|\$\(|\b(?:then|do|else|elif|if|while|until)\s|!\s)\s*+"
               r"(?:[a-z_]\w*=[^\s;&|()<>]*\s+)*"
               rf"(?:(?:[/\w.~-]*/)?(?:{_REMOTE_PIPE_WRAPPERS_RE}|xargs|(?:uv|poetry|pipenv|pdm|hatch|pixi|conda|mamba|micromamba)\s+run)\b"
               r"(?:\s+[^\s|;&()<>]+){0,6}?\s+)?"
               r"(?:[/\w.~-]*/)?")
+_PIPE_REMOTE_TO_INTERPRETER_DESCRIPTION = "pipe remote content to an interpreter"
+
+
+class _PipeRemoteToInterpreterMatcher:
+    """Fork: linear stand-in for the interpreter pipe rule below, built like _PipeRemoteToShellMatcher:
+    find the first curl/wget, then try the sink only at each later `|` (the rule's leading `.*` rescanned
+    the tail from every fetch word: quadratic on a long `curl | curl | …`)."""
+
+    _SINK = re.compile(rf"{_PIPE_INTO}{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}{_PIPE_STDIN_PROGRAM}", _RE_FLAGS)
+
+    def search(self, text: str):
+        fetch = _PIPE_FETCH_RE.search(text)
+        if fetch is None:
+            return None
+        return _PipeRemoteToShellMatcher._scan(text, fetch.end(), self._SINK, _PIPE_OPERATOR_RE, lookup_guard=False)
 
 
 # ---- Dangerous command patterns -----------------------------------------------------------
@@ -668,8 +684,9 @@ DANGEROUS_PATTERNS = [
     # Fork: the same into an interpreter that reads its program from stdin (no script, -c or -m
     # argument; those read stdin as data or are caught by the -c/-e rules). Upstream removed the
     # tirith scanner (911da42e9e), the only layer that caught `curl URL | python3`.
+    # Not compiled: DANGEROUS_PATTERNS_COMPILED swaps in _PipeRemoteToInterpreterMatcher (linear).
     (rf'\b(curl|wget)\b.*{_PIPE_INTO}{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}{_PIPE_STDIN_PROGRAM}',
-     "pipe remote content to an interpreter"),
+     _PIPE_REMOTE_TO_INTERPRETER_DESCRIPTION),
     (rf'(?<![\w.-])(?:{_SHELL_NAMES_RE})\s+<\s*<?\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
     # Fork: an interpreter handed the remote text as its script file (`python3 <(curl …)`,
     # `node - < <(wget …)`) — the shell rule above only knew shells (2026-10-23 review).
@@ -959,6 +976,7 @@ DANGEROUS_PATTERNS = [
 _PIPE_REMOTE_TO_SHELL_DESCRIPTION = "pipe remote content to shell"
 _CUSTOM_MATCHERS = {
     _PIPE_REMOTE_TO_SHELL_DESCRIPTION: _PipeRemoteToShellMatcher,
+    _PIPE_REMOTE_TO_INTERPRETER_DESCRIPTION: _PipeRemoteToInterpreterMatcher,
     _WMIC_SHADOW_DELETE_DESCRIPTION: WmicShadowDeleteMatcher,
     _DEV_TCP_REDIRECT_DESCRIPTION: _DevSocketRedirectMatcher,
     _DOWNLOAD_THEN_RUN_DESCRIPTION: lambda: DownloadThenRunMatcher(_SHELL_NAMES_RE),
