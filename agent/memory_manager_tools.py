@@ -28,13 +28,14 @@ def memory_provider_tools_enabled(enabled_toolsets: Optional[list[str]], disable
                                   *, memory_tool_present: bool = False) -> bool:
     """Return whether external memory-provider tools should be exposed.
 
-    ``"memory"`` in ``disabled_toolsets`` turns these off, deliberately: a user
-    who disables the memory toolset means ALL memory, providers included, and
+    ``"memory"`` (or the global ``"all"`` / ``"*"`` alias) in ``disabled_toolsets``
+    turns these off, deliberately: a user who disables the memory toolset means
+    ALL memory, providers included, and
     tests/agent/test_memory_provider.py pins that contract. Do not relax it to
     keep some caller working — fix that caller's denylist instead. Cron learned
     this the hard way on 2026-08-09; see _resolve_cron_disabled_toolsets.
     """
-    if disabled_toolsets and "memory" in disabled_toolsets:
+    if disabled_toolsets and {"memory", "all", "*"}.intersection(disabled_toolsets):
         return False
     if memory_tool_present or enabled_toolsets is None:
         return True
