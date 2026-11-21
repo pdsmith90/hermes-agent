@@ -258,8 +258,13 @@ def test_background_write_through_a_symlinked_alias_scans_the_alias(skills):
 
 
 def _seed_hardlinked_sibling(skills):
-    """references/workflow.md hardlinked at scripts/run.sh: the .sh name gets the padded-code rule."""
-    _seed(skills)
+    """references/workflow.md hardlinked at scripts/run.sh: the .sh name gets the padded-code rule.
+
+    Fork: the skill is created by the review itself. The review writes directly only to a skill it
+    created; its write to any other skill is staged and never reaches the tree, which would leave the
+    two write-path tests below with nothing to observe."""
+    with _origin(BACKGROUND_REVIEW):
+        _seed(skills)
     ref = skills / "bg-skill" / "references" / "workflow.md"
     sibling = skills / "bg-skill" / "scripts" / "run.sh"
     sibling.parent.mkdir()
