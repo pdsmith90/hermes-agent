@@ -487,9 +487,14 @@ _PIPE_INTERP_OPTS = r"(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*))*"
 # Fork (2026-11-11): an OUTPUT redirect after the interpreter still leaves the pipe as its program; an
 # input redirect (`| python3 << 'EOF'`, `< script.py`) replaces stdin, so the program is local. The
 # remote `python3 < <(curl …)` form is the interpreter process-substitution rule's.
-# The output redirects must end the stage (`| python3 > out.txt build.py` runs build.py, not the pipe).
+# Only a script named after the redirects makes the program local (`| python3 > out.txt build.py` runs
+# build.py, the pipe is its data). Anything else after them keeps the pipe as the program: the end of the
+# stage, `-` or /dev/stdin with or without argv, an option. A redirect's target may be an fd, a bare or quoted
+# name or a process substitution (`2>&1`, `> "out file.txt"`, `>| out.txt`, `2> >(logger -t x)`); each one is
+# matched possessively, so a target cannot be cut short to step around the script check.
+_PIPE_OUT_REDIRECT = r"""\s*+(?:\d?>>?\|?|&>>?)\s*+(?:>\([^)]*+\)|&?(?:"[^"]*+"|'[^']*+'|[^\s<>|;&()"']++))"""
 _PIPE_STDIN_PROGRAM = (r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)"
-                       r"|(?:\s*(?:\d?>>?|&>>?)&?\s*[^\s<>|;&()]+)+(?:\s+(?:-|/dev/stdin))?(?=\s*(?:$|[;&|)]))"
+                       rf"|(?:{_PIPE_OUT_REDIRECT})++(?!\s+(?!/dev/stdin(?:[\s;&|)]|$))[^\s\-;&|()<>])"
                        r"|\s*$|\s*[;&)]|\s+\|)")
 # Fork (2026-11-20 review): an interpreter's own options, any of them, up to the first argument that is
 # not an option (the script): `-u`, `--project=.`, `-W ignore`. Unlike _PIPE_INTERP_OPTS this takes
@@ -696,6 +701,10 @@ DANGEROUS_PATTERNS = [
     (rf'\b{_PIPE_INTERPRETERS_RE}{_PIPE_INTERP_OPTS}\s+<?\s*<\s*\(\s*(curl|wget)\b',
      "execute remote script via process substitution"),
     (_CMDPOS + r'(?:source|\.)\s+<\s*\(\s*(curl|wget)\b', "execute remote script via process substitution"),
+    # Fork: the same wherever it stands, as the fork's rule had it before the merge took the command-position
+    # form above: an assignment prefix (`X=1 source <(curl …)`), `builtin` / `command`, and a command quoted
+    # into another program (`ssh host "source <(curl …)"`) are not command positions for _CMDPOS.
+    (r'(?:\bsource|(?:^|[\s;&|(])\.)\s+<\s*\(\s*(?:curl|wget)\b', "execute remote script via process substitution"),
     # eval/source/. $(curl ...) — equivalent to piping remote content to a shell.
     # Fork (2026-11-11): space may follow the quote too (`eval " $(curl …)"`).
     (r'(?:\beval\b|\bsource\b|\.)\s*["\']?\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b', "execute remote content via command substitution"),

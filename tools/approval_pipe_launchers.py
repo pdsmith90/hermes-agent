@@ -20,6 +20,10 @@ _PIPE_LAUNCHER_VALUE_FLAGS = {
     "busybox": ("", ()),
     "setsid": ("", ()),
     "ionice": ("cnpPu", ("class", "classdata", "pid", "pgid", "uid")),
+    # Fork: moreutils' chronic and expect's unbuffer run their trailing words too (`unbuffer -p` passes its
+    # stdin on). The fork's own pipe rule knew both before this sink replaced it.
+    "chronic": ("", ()),
+    "unbuffer": ("", ()),
 }
 
 
