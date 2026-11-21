@@ -16,7 +16,7 @@ import os
 import pytest
 
 import tools.file_tools as ft
-import tools.file_tools_write_guards as wg  # the sensitive-path guard and its home cache live here since the 2026-09-18 sync
+import tools.file_tools_write_guards as wg  # the sensitive-path guard and its home lookup live here since the 2026-09-18 sync
 
 
 @pytest.fixture
@@ -24,8 +24,8 @@ def hermes_home(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     (home / "cron" / "output" / "abc").mkdir(parents=True)
     (home / "memories").mkdir()
-    monkeypatch.setattr(wg, "_real_hermes_home_cached", str(home.resolve()))
-    monkeypatch.setattr(wg, "_real_hermes_home_loaded", True)
+    # The guard resolves the home per call (the module-level override slots are gone upstream).
+    monkeypatch.setattr(wg, "_get_real_hermes_home", lambda: str(home.resolve()))
     return home
 
 
