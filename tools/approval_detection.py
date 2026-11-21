@@ -487,7 +487,10 @@ _PIPE_INTERP_OPTS = r"(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*))*"
 # Fork (2026-11-11): an OUTPUT redirect after the interpreter still leaves the pipe as its program; an
 # input redirect (`| python3 << 'EOF'`, `< script.py`) replaces stdin, so the program is local. The
 # remote `python3 < <(curl …)` form is the interpreter process-substitution rule's.
-_PIPE_STDIN_PROGRAM = r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)|\s*(?:\d?>|&>)|\s*$|\s*[;&)]|\s+\|)"
+# The output redirects must end the stage (`| python3 > out.txt build.py` runs build.py, not the pipe).
+_PIPE_STDIN_PROGRAM = (r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)"
+                       r"|(?:\s*(?:\d?>>?|&>>?)&?\s*[^\s<>|;&()]+)+(?:\s+(?:-|/dev/stdin))?(?=\s*(?:$|[;&|)]))"
+                       r"|\s*$|\s*[;&)]|\s+\|)")
 # Fork (2026-11-20 review): an interpreter's own options, any of them, up to the first argument that is
 # not an option (the script): `-u`, `--project=.`, `-W ignore`. Unlike _PIPE_INTERP_OPTS this takes
 # -c/-e/-m too; the rule that uses it looks for the option whose VALUE is the remote text. No token
