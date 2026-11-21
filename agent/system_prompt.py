@@ -604,7 +604,7 @@ def _guidance_parts(agent: Any) -> list[str]:
     # produce one. On 2026-08-13 a cron agent emitted a forged marker as its OWN assistant output
     # and obeyed it, creating two cron jobs via `hermes cron create` that no job prompt authorized.
     from agent.oneshot_footprint import agent_is_oneshot
-    if (agent.platform or "").lower().strip() != "cron" and not agent_is_oneshot(agent):
+    if (getattr(agent, "platform", None) or "").lower().strip() != "cron" and not agent_is_oneshot(agent):
         parts.append(STEER_CHANNEL_NOTE)
     # agent.tool_use_enforcement / agent.execution_guidance: "auto" (default)
     # matches the hardcoded model lists; true/false force; a list gives custom
