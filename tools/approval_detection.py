@@ -35,6 +35,7 @@ from tools.approval_applescript import OSASCRIPT_OPAQUE_DESCRIPTION, OSASCRIPT_R
 from tools.approval_quoted_newlines import _mask_quoted_newlines
 from tools.approval_variation_selectors import _EMOJI_RANGE, _HIDDEN_VARIATION_SELECTOR_RE
 from tools.approval_wmic import WmicShadowDeleteMatcher
+from tools.shell_heredoc import mask_heredoc_bodies_for_shell_scan
 
 
 # Sensitive write targets, matched via ~ / $HOME / $HERMES_HOME spellings. The resolved absolute
@@ -2123,14 +2124,200 @@ _REMOTE_EXEC_PATTERNS_COMPILED = [
 ]
 
 
-def detect_remote_exec_command(command: str) -> tuple:
-    """-> (is_remote_exec, description). Checks every fetch-and-execute pattern rather than the
-    first dangerous match, since detect_dangerous_command can report an earlier pattern first.
-    Like the hardline and deny floors it reads the raw command too (``floors=True``): a heredoc
-    body the dangerous-prompt layer drops as inert data still counts here."""
+# Fork (2026-11-21): programs that hand a command string to a shell on another host, as another user or in a
+# container. Every rule above reads `ssh host "curl … | sh"` as one quoted word, so the floor let it through.
+# The floor splices each carried command in place of the command that carries it and reads the result again
+# (_carried_command_text), so the rules see the carried text as code and a pipe into the carrier still feeds it
+# (`curl … | ssh host sh`). Shell -c strings and eval code take part only so a carrier inside them is found.
+# Argv carriers run the argv after their subcommand or `--`; the program is the first word that names a shell,
+# an interpreter, a wrapper or another carrier (`docker exec -u root c sh -c …`), or the word after `--`.
+_ARGV_CARRIERS = {"docker": "exec", "podman": "exec", "kubectl": "exec", "oc": "exec", "lxc": "exec",
+                  "incus": "exec", "nsenter": None, "unshare": None, "doas": None, "xargs": None}
+_STRING_CARRIERS = frozenset({"ssh", "su", "runuser", "eval", *_SHELL_NAMES})
+_CARRIED_SHELL_NAMES = frozenset(_PIPE_SHELL_NAMES_RE.split("|"))
+_MAY_NAME_CARRIER_RE = re.compile(
+    rf"(?<![\w.-])(?:{'|'.join(sorted({*_ARGV_CARRIERS, *_STRING_CARRIERS}))})(?![\w-])|\$'", re.IGNORECASE)
+# OpenSSH options that take a value (`-p 22`, `-oX=y`); -N, -s, -O and -W run no remote shell at all, -n and -f
+# give the remote command no stdin from this side.
+_SSH_OPTIONS_WITH_ARG = frozenset("BDEFIJLOPQRSWbceilmopw")
+_SSH_REMOTE_COMMAND_RE = re.compile(r"\s*remotecommand\s*(?:=\s*|\s+)(.+)", re.IGNORECASE | re.DOTALL)
+_SU_OPTIONS_WITH_ARG = frozenset("cgGsw")
+_SU_LONG_OPTIONS_WITH_ARG = ("--group", "--supp-group", "--shell", "--whitelist-environment")
+# Carriers nest (`ssh a "ssh b '…'"`); each level is a full re-read. Deeper text that still names a fetch fails closed.
+_MAX_CARRIED_DEPTH = 4
+_CARRIED_DEPTH_DESCRIPTION = "fetch inside commands nested too deep to read (remote-exec floor)"
+_FETCH_HINT_RE = re.compile(r"curl|wget|\$['(]|`", re.IGNORECASE)
+
+
+def _carrier_words(text: str, start: int, end: int) -> list[tuple[int, int, str]]:
+    """``(start, end, dequoted)`` for each word of the command at *start* up to *end*; redirections are skipped."""
+    words, pos = [], start
+    while pos < end:
+        redirect = _SHELL_REDIRECTION_RE.match(text, _skip_shell_whitespace(text, pos))
+        if redirect:
+            _, pos, _ = _read_shell_word(text, redirect.end())
+            continue
+        word_start, word_end, word = _read_shell_word(text, pos)
+        if word_start == word_end or word_start >= end:
+            break
+        tokens = _shell_segment_tokens(word, 0)
+        words.append((word_start, word_end, " ".join(tokens) if tokens else _strip_shell_word_syntax(word)))
+        pos = word_end
+    return words
+
+
+def _ssh_carried(values: list[str]) -> tuple[str, bool] | None:
+    host, remote, stdin, index = None, None, True, 0
+    while index < len(values):
+        value = values[index]
+        if value == "--":
+            index += 1
+            if host is None and index < len(values):
+                host, index = values[index], index + 1
+            break
+        if value.startswith("-") and len(value) > 1:
+            for k, char in enumerate(value[1:], start=1):
+                if char in _SSH_OPTIONS_WITH_ARG:
+                    option_value = value[k + 1:]
+                    if not option_value and index + 1 < len(values):
+                        index += 1
+                        option_value = values[index]
+                    if char in "OW":
+                        return None
+                    if char == "o" and (remote_command := _SSH_REMOTE_COMMAND_RE.match(option_value)):
+                        remote = remote_command.group(1)
+                    break
+                if char in "Ns":
+                    return None
+                stdin = stdin and char not in "nf"
+            index += 1
+            continue
+        if host is None:
+            host, index = value, index + 1
+            continue
+        break
+    if host is None:
+        return None
+    # No command: the remote login shell reads its commands from this side's stdin.
+    return " ".join(values[index:]) or remote or "sh", stdin
+
+
+def _su_carried(values: list[str]) -> str:
+    index = 0
+    while index < len(values):
+        value = values[index]
+        if value.startswith("--") and len(value) > 2:
+            option, equals, option_value = value.partition("=")
+            # getopt_long takes any unambiguous prefix (`--comm`, `--se`).
+            if "--command".startswith(option) or len(option) > 3 and "--session-command".startswith(option):
+                return option_value if equals else (values[index + 1] if index + 1 < len(values) else "")
+            index += 2 if not equals and any(long.startswith(option) for long in _SU_LONG_OPTIONS_WITH_ARG) else 1
+            continue
+        if value.startswith("-") and len(value) > 1:
+            for k, char in enumerate(value[1:], start=1):
+                if char in _SU_OPTIONS_WITH_ARG:
+                    option_value = value[k + 1:]
+                    if not option_value:
+                        index += 1
+                        option_value = values[index] if index < len(values) else ""
+                    if char == "c":
+                        return option_value
+                    break
+        index += 1
+    return "sh"  # no -c: the target user's shell reads its commands from stdin
+
+
+def _names_carried_program(value: str) -> bool:
+    name = os.path.basename(value).lower().removesuffix(".exe")
+    return (name in _CARRIED_SHELL_NAMES or name in _COMMAND_WRAPPER_WORDS or name in _ARGV_CARRIERS
+            or name in _STRING_CARRIERS or _interpreter_family(value) is not None)
+
+
+def _carried_splice(text: str, start: int, name: str) -> tuple[int, int, str] | None:
+    """``(start, end, replacement)`` that puts the command the carrier at *start* runs in its place, or None."""
+    all_words = _carrier_words(text, start, start + len(_shell_command_segment(text, start)))
+    words = all_words[1:]
+    values = [value for _, _, value in words]
+    if name in _ARGV_CARRIERS:
+        first = 0
+        if (subcommand := _ARGV_CARRIERS[name]) is not None:
+            first = next((k + 1 for k, value in enumerate(values) if value == subcommand), len(values))
+        tail = values[first:]
+        program = first + tail.index("--") + 1 if "--" in tail else next(
+            (first + k for k, value in enumerate(tail) if _names_carried_program(value)), len(values))
+        if program >= len(values):
+            return None
+        # The program's own text stays as written; only the carrier and its options go. xargs feeds the
+        # program its argv, not its stdin, so a pipe into xargs does not reach the program.
+        return start, words[program][0], " \n" if name != "xargs" else " :\n"
+    if name == "ssh":
+        carried = _ssh_carried(values)
+    elif name in ("su", "runuser"):
+        carried = (_su_carried(values), True)
+    elif name == "eval":
+        carried = (_eval_payload(values), True)
+    else:
+        found, payload = _bash_exec_payload(values)
+        carried = (payload, True) if found else None
+    if not carried or not carried[0]:
+        return None
+    # The rules above already read a -c string or eval code as code; it is re-read only when a carrier may sit
+    # inside, or when it spans lines (the payload variants above read its line breaks as spaces).
+    if name not in ("ssh", "su", "runuser") and "\n" not in carried[0] \
+            and not _MAY_NAME_CARRIER_RE.search(re.sub(r"[\\'\"]", "", carried[0])):
+        return None
+    # Redirections after the last word stay in place: they still feed or take the carried command's streams.
+    return start, all_words[-1][1], (" \n" if carried[1] else " :\n") + carried[0]
+
+
+def _carried_command_text(command: str) -> tuple[str, list[str]]:
+    """*command* with each carried command spliced over its carrier, and the carried commands whose
+    quoting does not balance (read on their own: spliced, an open quote would swallow the text after it)."""
+    # Heredoc bodies that are data or another language's code hold no carrier; a body a shell runs stays.
+    text = expand_ansi_c_quotes(mask_heredoc_bodies_for_shell_scan(command, code_consumers=True))
+    edits, unbalanced, cursor = [], [], 0
+    # A carrier inside another one's text (`ssh a "ssh b …"`, `$(ssh …)` in an argument) is read at the next level.
+    carriers = sorted((start, name) for start, _, word in _iter_shell_command_word_spans(text)
+                      if (name := os.path.basename(_deobfuscate_shell_word_for_detection(word)).lower()
+                          .removesuffix(".exe")) in _ARGV_CARRIERS or name in _STRING_CARRIERS)
+    for start, name in carriers:
+        if start < cursor:
+            continue
+        splice = _carried_splice(text, start, name)
+        if splice is None:
+            continue
+        if _shell_segment_tokens(splice[2], 0) is None:
+            unbalanced.append(splice[2])
+            continue
+        edits.append(splice)
+        cursor = splice[1]
+    return (_splice(text, edits) if edits else command), unbalanced
+
+
+def _detect_remote_exec(command: str, depth: int) -> tuple:
     for command_variant in _command_detection_variants(command, floors=True):
         command_lower = _lower_preserving_flags(command_variant)
         for pattern_re, description in _REMOTE_EXEC_PATTERNS_COMPILED:
             if pattern_re.search(command_lower):
                 return (True, description)
+    spliced, unbalanced = _carried_command_text(command)
+    for text in dict.fromkeys((*((spliced,) if spliced != command else ()), *unbalanced)):
+        # Every floor rule needs a fetch, so text that cannot spell one (outside comments) is not read again.
+        code = "".join(text[i:j] for kind, i, j, _ in _scan_shell(text, comments=True) if kind != "comment")
+        if not _FETCH_HINT_RE.search(_normalize_command_for_detection(code)):
+            continue
+        if depth >= _MAX_CARRIED_DEPTH:
+            return (True, _CARRIED_DEPTH_DESCRIPTION)
+        verdict = _detect_remote_exec(text, depth + 1)
+        if verdict[0]:
+            return verdict
     return (False, None)
+
+
+def detect_remote_exec_command(command: str) -> tuple:
+    """-> (is_remote_exec, description). Checks every fetch-and-execute pattern rather than the
+    first dangerous match, since detect_dangerous_command can report an earlier pattern first.
+    Like the hardline and deny floors it reads the raw command too (``floors=True``): a heredoc
+    body the dangerous-prompt layer drops as inert data still counts here. A command that a carrier
+    (ssh, su, docker exec, ...) runs is read as a command of its own (_carried_command_text)."""
+    return _detect_remote_exec(command, 0)
