@@ -6,8 +6,10 @@ order the runtime guard (``check_all_command_guards``) applies them:
 
 1. container-skip gate (isolated backends bypass all guards), 2. hardline blocklist (never
 bypassable, fires before yolo/off), 3. sudo-stdin guard (unconditional), 4. user ``approvals.deny``
-rules (fire before yolo/off), 5. yolo / ``approvals.mode: off`` bypass (which refuses a command
-the hardline scan could not read to the end: only a human may approve that), 6. permanent
+rules (fire before yolo/off), 4b. (fork) the remote-exec floor (fetch-and-execute, unconditional;
+it also reads a command that ssh, su or a container exec carries), 5. yolo / ``approvals.mode:
+off`` bypass (which refuses a command the hardline scan could not read to the end: only a human
+may approve that), 6. permanent
 ``command_allowlist`` (not for such a command), 7. dangerous-pattern detection (would prompt).
 """
 
@@ -88,6 +90,17 @@ def evaluate_command(command: str, env_type: str = "local") -> dict:
             "user-deny", rule=deny_pattern,
             detail="matches a user-defined approvals.deny rule in "
                    "config.yaml (blocked even under --yolo / mode=off)",
+        )
+
+    # 4b. (fork) Remote-exec floor — unconditional, after the deny rules as at runtime (_floor_block). The
+    #     dangerous patterns below do not read a carried command (`ssh host "curl … | sh"`), so without this
+    #     step the dry run said allow for a command the runtime blocks.
+    is_remote_exec, remote_exec_desc = approval_detection.detect_remote_exec_command(command)
+    if is_remote_exec:
+        return result(
+            "hardline-deny", rule=remote_exec_desc,
+            detail="fetches remote content and executes it (remote-exec floor: never bypassable, "
+                   "blocked even under --yolo / approvals.mode=off)",
         )
 
     # 5. Yolo / approvals.mode=off bypass. A command the hardline scan could not finish is
