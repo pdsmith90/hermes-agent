@@ -247,6 +247,23 @@ _PIPE_INTERP_OPTS = r"(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*))*"
 # input redirect (`| python3 << 'EOF'`, `< script.py`) replaces stdin, so the program is local. The
 # remote `python3 < <(curl …)` form is the interpreter process-substitution rule's.
 _PIPE_STDIN_PROGRAM = r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)|\s*(?:\d?>|&>)|\s*$|\s*[;&)]|\s+\|)"
+# Fork (2026-11-20 review): an interpreter's own options, any of them, up to the first argument that is
+# not an option (the script): `-u`, `--project=.`, `-W ignore`. Unlike _PIPE_INTERP_OPTS this takes
+# -c/-e/-m too; the rule that uses it looks for the option whose VALUE is the remote text. No token
+# crosses a shell separator or redirection, so `python3 -V|grep -e "$(curl …)"` is two commands.
+_REMOTE_OWN_OPTS = r"""(?:\s+(?:-[wx]\s+[^\s\-;&|()<>"'`$][^\s;&|()<>"'`$]*|-[^\s"'`$;&|()<>]*))*"""
+# An output redirection between a program and its here-string (`bash 2>&1 <<< …`, `python3 > out.log <<< …`).
+_OUT_REDIRECT = r"""\s*(?:\d?>>?|&>>?)&?\s*[^\s<>|;&()]+"""
+# Where a command begins, for the rules that must not mistake an ARGUMENT for the program (`grep python3
+# -e "$(curl …)"`, `git commit -m 'catch python3 -c "$(curl …)"'`): the start of the text, of a line or
+# after a separator (the detection variants also put each command on its own line), then any VAR=value
+# assignments, one wrapper with a few arguments (`sudo -u root`, `env X=1`, `timeout 5`, `xargs`, `uv run`)
+# and a path.
+_CMD_START = (r"(?:^|[\n;&|({`]|\$\(|\b(?:then|do|else|elif|if|while|until)\s|!\s)\s*"
+              r"(?:[a-z_]\w*=[^\s;&|()<>]*\s+)*"
+              rf"(?:(?:[/\w.~-]*/)?(?:{_PIPE_WRAPPERS_RE}|xargs|(?:uv|poetry|pipenv|pdm|hatch|pixi|conda|mamba|micromamba)\s+run)\b"
+              r"(?:\s+[^\s|;&()<>]+){0,6}?\s+)?"
+              r"(?:[/\w.~-]*/)?")
 
 
 # ---- Dangerous command patterns -----------------------------------------------------------
@@ -355,6 +372,33 @@ DANGEROUS_PATTERNS = [
     # Fork (2026-11-11): the same handed to a shell's -c (`sh -c "$(curl …)"`), which only the generic
     # -c finding caught, so the remote-execution floor could not see it.
     (rf'\b(?:{_SHELL_NAMES_RE})\s+-\w*c\w*\s+["\']?\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b',
+     "execute remote content via command substitution"),
+    # Fork (2026-11-20 review): the same handed to an interpreter as the value of an option that takes a
+    # PROGRAM (`python3 -c "$(curl …)"`, `node -e`/`-p`, `perl -e`/`-pe`, `php -r`, `node --eval=`,
+    # `deno eval`): only the generic -c/-e finding caught these, so the floor could not see them. Only
+    # the interpreter's own options count, and only the program-taking ones: `python3 tool.py --token
+    # "$(curl …)"` and `node --max-old-space-size="$(curl …)" app.js` hand a local program data. The
+    # interpreter must stand where a command begins (_CMD_START), so its name as another program's
+    # argument or inside quoted text does not count. Limits: an option value that is a separate word
+    # (other than after -W/-X) hides what follows it, and the substitution must open the value.
+    (rf'{_CMD_START}{_PIPE_INTERPRETERS_RE}{_REMOTE_OWN_OPTS}\s+'
+     rf'(?:(?:-\w*[cepr](?![\w-])|--(?:eval|print)(?![\w-]))[=\s]*|eval{_REMOTE_OWN_OPTS}\s+)'
+     r'["\']?\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b',
+     "execute remote content via command substitution"),
+    # Fork (2026-11-20 review): and fed as a here-string to a shell or interpreter that reads its
+    # program from stdin (`bash <<< "$(curl …)"`, `sh -s <<< …`, `bash 2>&1 <<< …`, `python3 - <<< …`).
+    # With a script or a -c/-e program the here-string is only data (`python3 parse.py <<< "$(curl …)"`,
+    # `bash -xc "$X" <<< …`), as for a pipe: for a shell, the script or the -c program is a word that
+    # is not an option, which ends the option run before the here-string.
+    (rf'{_CMD_START}(?:{_PIPE_SHELLS_RE})'
+     rf'(?:\s+[-+]o\s+\w+|\s+-[^\s<>|;&()]*|{_OUT_REDIRECT})*'
+     rf'(?:\s+/dev/stdin)?(?:{_OUT_REDIRECT})*'
+     r'\s*<<<\s*["\']?\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b',
+     "execute remote content via command substitution"),
+    (rf'{_CMD_START}{_PIPE_INTERPRETERS_RE}(?:\s+run\b)?'
+     rf'(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*(?:=[^\s<>|;&()"\'`$]*)?)|{_OUT_REDIRECT})*'
+     rf'(?:\s+(?:-|/dev/stdin)(?:\s+[^\s<>|;&()]+)*)?(?:{_OUT_REDIRECT})*'
+     r'\s*<<<\s*["\']?\s*(?:\$\(\s*|`\s*)(?:curl|wget)\b',
      "execute remote content via command substitution"),
     # Cloud instance-metadata (IMDS) credential endpoints — deterministic containment-escape
     # detection. On a cloud VM these serve live IAM/service-account credentials to ANY local
