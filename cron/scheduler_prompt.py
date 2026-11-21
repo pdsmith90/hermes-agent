@@ -470,7 +470,7 @@ def _neutralize_injected_data_directives(
     labels = _matching_scanner_labels(source_components)
     if not labels or any(label not in _INJECTED_DATA_LABELS for label in labels):
         return None
-    from tools.cronjob_prompt_scan import (
+    from cron.prompt_scan import (
         _neutralize_cron_directives, _scan_cron_skill_assembled, _strip_invisible_unicode,
     )
     neutralized, pids, count = _neutralize_cron_directives(assembled)
@@ -502,7 +502,7 @@ def _matching_scanner_labels(
     if not source_components:
         return []
     from tools.cronjob_tools import _scan_cron_prompt
-    from tools.cronjob_prompt_scan import _scan_cron_skill_assembled
+    from cron.prompt_scan import _scan_cron_skill_assembled
 
     matches = []
     for label, text, strict in source_components:

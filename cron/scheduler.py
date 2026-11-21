@@ -434,7 +434,7 @@ def _prompt_injection_block_sources(
     job: dict, *, extra_prompt: Optional[str], prerun_script, runtime_data_prompt: Optional[str],
 ) -> str:
     """Identify the scanned input section that independently matches, without returning its text."""
-    from tools.cronjob_prompt_scan import _scan_cron_skill_assembled
+    from cron.prompt_scan import _scan_cron_skill_assembled
     from tools.cronjob_tools import _scan_cron_prompt
 
     matches = []

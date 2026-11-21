@@ -490,7 +490,7 @@ def _preflight_check_prompt_scan(job: dict) -> Optional[str]:
     prompt = job.get("prompt") or ""
     if job.get("no_agent") or not prompt.strip():
         return None
-    from tools.cronjob_prompt_scan import _scan_cron_prompt, _scan_cron_skill_assembled
+    from cron.prompt_scan import _scan_cron_prompt, _scan_cron_skill_assembled
     if job.get("skills") or job.get("skill"):
         _cleaned, scan_error = _scan_cron_skill_assembled(prompt)
     else:
@@ -500,7 +500,7 @@ def _preflight_check_prompt_scan(job: dict) -> Optional[str]:
     return (
         f"the job's prompt trips the cron injection scanner ({scan_error}) so every fire would be "
         "refused. Rephrase the sentence — describe a command instead of quoting it — or attach the "
-        "skill the wording assumed; patterns: tools/cronjob_prompt_scan.py::_CRON_THREAT_PATTERNS."
+        "skill the wording assumed; patterns: cron/prompt_scan.py::_CRON_THREAT_PATTERNS."
     )
 
 
