@@ -487,14 +487,20 @@ _PIPE_INTERP_OPTS = r"(?:\s+(?:-[wx]\s*[^\s-]\S*|-(?![cem]\b)[\w-]*))*"
 # Fork (2026-11-11): an OUTPUT redirect after the interpreter still leaves the pipe as its program; an
 # input redirect (`| python3 << 'EOF'`, `< script.py`) replaces stdin, so the program is local. The
 # remote `python3 < <(curl …)` form is the interpreter process-substitution rule's.
-# Only a script named after the redirects makes the program local (`| python3 > out.txt build.py` runs
-# build.py, the pipe is its data). Anything else after them keeps the pipe as the program: the end of the
-# stage, `-` or /dev/stdin with or without argv, an option. A redirect's target may be an fd, a bare or quoted
-# name or a process substitution (`2>&1`, `> "out file.txt"`, `>| out.txt`, `2> >(logger -t x)`); each one is
-# matched possessively, so a target cannot be cut short to step around the script check.
-_PIPE_OUT_REDIRECT = r"""\s*+(?:\d?>>?\|?|&>>?)\s*+(?:>\([^)]*+\)|&?(?:"[^"]*+"|'[^']*+'|[^\s<>|;&()"']++))"""
+# Only a script named after the redirects, on the same line, makes the program local (`| python3 > out.txt
+# build.py` runs build.py, the pipe is its data). Anything else keeps the pipe as the program: the end of the
+# stage, a comment, a line break, `-` or /dev/stdin with or without argv, an option. A redirect whose target is
+# not a plain fd or name (a process substitution, an unterminated quote, nothing) is never read past: it stays
+# flagged, as every redirect was before this distinction existed. Redirects are matched possessively, so a
+# target cannot be cut short to step around the script check. A detection variant breaks the line after the
+# `&` of `2>&1`, so a target may follow its `&`, and an operator its target, across a line break.
+_PIPE_OUT_OP = r"(?:\d?>>?\|?|&>>?)"
+_PIPE_OUT_TARGET = r"""(?:&\s*+)?(?:"[^"]*+"|'[^']*+'|[^\s<>|;&()"']++)"""
+_PIPE_OUT_REDIRECT = rf"[^\S\n]*+{_PIPE_OUT_OP}\s*+{_PIPE_OUT_TARGET}"
 _PIPE_STDIN_PROGRAM = (r"(?:\s+(?:-|/dev/stdin)(?=[\s;&|)]|$)"
-                       rf"|(?:{_PIPE_OUT_REDIRECT})++(?!\s+(?!/dev/stdin(?:[\s;&|)]|$))[^\s\-;&|()<>])"
+                       rf"|[^\S\n]*+\n\s*+{_PIPE_OUT_OP}"
+                       rf"|(?:{_PIPE_OUT_REDIRECT})*+[^\S\n]*+{_PIPE_OUT_OP}(?!\s*+{_PIPE_OUT_TARGET})"
+                       rf"|(?:{_PIPE_OUT_REDIRECT})++(?![^\S\n]+(?!/dev/stdin(?:[\s;&|)]|$))[^\s\-;&|()<>#])"
                        r"|\s*$|\s*[;&)]|\s+\|)")
 # Fork (2026-11-20 review): an interpreter's own options, any of them, up to the first argument that is
 # not an option (the script): `-u`, `--project=.`, `-W ignore`. Unlike _PIPE_INTERP_OPTS this takes
