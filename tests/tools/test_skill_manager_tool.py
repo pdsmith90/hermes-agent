@@ -1588,7 +1588,10 @@ class TestLockedGuard:
         assert sib["success"] is True, sib
         assert refused["success"] is False and "locked" in refused["error"], refused
         assert lifted["success"] is True, lifted
-        assert "Do the new thing." in (locked / "SKILL.md").read_text()
+        # Fork: the review fork stages its writes to a skill it did not create, so the lifted
+        # refusal shows as a staged patch, not an applied one.
+        assert lifted.get("staged") is True, lifted
+        assert "Do the new thing." not in (locked / "SKILL.md").read_text()
 
     def test_foreground_mutations_are_refused_too(self, tmp_path, monkeypatch):
         """The lock is the user's: a normal turn asking for the edit is refused like the review fork."""
@@ -1656,7 +1659,8 @@ class TestLockedGuard:
             assert skill_usage.is_locked("shared-name") is False
             res = self._bg(d, name="shared-name", **self._PATCH)
         assert res["success"] is True, res
-        assert "Do the new thing." in (d / "SKILL.md").read_text()
+        # Fork: not refused by the other profile's lock; staged, since the review did not create it.
+        assert res.get("staged") is True, res
 
     def test_corrupt_sidecar_fails_closed_for_autonomous_writes_only(self, tmp_path, monkeypatch):
         skills = self._profile(tmp_path, monkeypatch)
