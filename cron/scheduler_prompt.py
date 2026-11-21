@@ -444,7 +444,7 @@ def _scan_assembled_cron_prompt(
             "Cron job '%s': assembled prompt blocked by injection scanner — %s",
             job.get("name") or job.get("id") or "<unknown>", scan_error)
         blocked = _sched.CronPromptInjectionBlocked(scan_error)
-        setattr(blocked, "scanner_source", _matching_scanner_sources(source_components))
+        blocked.scanner_source = _matching_scanner_sources(source_components)
         raise blocked
     return assembled
 

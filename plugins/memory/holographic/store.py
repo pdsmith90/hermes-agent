@@ -1331,7 +1331,7 @@ class MemoryStore:
                 return False
             prior_content = row["content"]
 
-            embed_content: "str | None" = None
+            embed_content: str | None = None
             assignments: list[str] = ["updated_at = CURRENT_TIMESTAMP"]
             params: list = []
 
