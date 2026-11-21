@@ -499,6 +499,52 @@ class TestProseCheckPure:
         problems, _ = _prose_check(line, [], [], [], [], [])
         assert problems == []
 
+    @pytest.mark.parametrize("line", [
+        # "resolved" alone names no lineage (2026-11-20 review): a consolidate job reports its own
+        # merges with that word, so each of these claims a write the empty ledger does not carry.
+        "Resolved: fid 4600 → fid 4601",
+        "Resolved duplicates: 4690 → 4827, 4725 → 4828",
+        "Duplicate resolution: 4690 → 4827",
+        "- Resolved duplicates (4900 → 4901, 4902 → 4903)",
+        "4500 → 4501 resolution complete: merged both into LESSON 4502",
+        "Contradictions resolved this run:\n- 4690 → 4827 (citation)\n- 4725 → 4828 (prioritization)",
+        "## Contradictions resolved this run\n- fid 4690 → LESSON 4827",
+        # a settled-earlier phrase that goes on to name this run is this run's own work
+        "Resolved earlier this run: fid 4600 → fid 4601",
+        "Already resolved in this run (4600 → 4601)",
+        "Already resolved (this run): 4600 → 4601",
+        "Already resolved in the current run: 4600 → 4601",
+        "Resolved earlier during the session: 4600 → 4601",
+        "Already resolved tonight: 4600 → 4601",
+        "Already resolved tonight by merging 4600 → 4601",
+        "Resolved earlier today by this job: 4600 → 4601",
+        # the 25-char gap is measured from "resolved", so a later claim on the line stays one
+        "Already resolved earlier, and tonight I merged 4600 → 4601",
+        "Resolved previously; this time collapsed 4600 → 4601",
+    ])
+    def test_a_resolved_line_that_names_this_runs_own_work_stays_a_claim(self, line):
+        problems, _ = _prose_check(line, [], [], [], [], [])
+        assert any("but the store recorded no such write" in p for p in problems), problems
+
+    @pytest.mark.parametrize("line", [
+        "Already resolved earlier: 4690 → 4827",
+        "- previously resolved by the deep review (fid 4690 → LESSON 4827)",
+        "Resolved earlier today by another session (fids 4690→4827, 4725→4828).",
+        "- Resolved earlier this week by another session (fids 4690→4827, 4725→4828).",
+        "Previously resolved this morning by the deep review (fid 4690 → LESSON 4827)",
+        "Already resolved earlier:\n- 4690 → 4827 (citation)\n- 4725 → 4828 (prioritization)",
+    ])
+    def test_a_resolution_dated_before_this_run_is_lineage(self, line):
+        problems, _ = _prose_check(line, [], [], [], [], [])
+        assert problems == []
+
+    def test_a_this_run_resolution_the_ledger_carries_is_not_a_problem(self):
+        text = "Contradictions resolved this run:\n- 4690 → 4827 (citation)"
+        problems, _ = _prose_check(text, [], [], [], [], [])
+        assert problems == ["claims → 4690 but the store recorded no such write"]
+        problems, _ = _prose_check(text, [{"fact_id": 4827}], [], [{"fact_id": 4690}], [], [])
+        assert problems == []
+
     @pytest.mark.parametrize("claim", [
         "Then merged 4440 → 4441 chain members into one.",
         "fid 4440 → fid 4441 superseded tonight.",

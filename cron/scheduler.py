@@ -3070,9 +3070,28 @@ _PROSE_ID_CHAIN = re.compile(
 # "The OpenCode timeout chain (4071→4013/4062) was already handled" (2026-10-26 consolidate, cron review
 # #218) named one correction fact and the two it corrects: "chain" is a lineage word, and the right side
 # of a pair may be a "/" list. A pair may end a sentence: only a decimal ("3126.5") stops it.
-# A lineage word names a relationship between existing facts (supersession, pairing, chain, resolution)
-# rather than a new store write (2026-10-11 review #166; 2026-11-20 review #278).
-_PROSE_LINEAGE_WORD = r"\b(?:pairs?|chains?|supersed\w*|supersession|lineage|resolv\w*|resolutions?)\b"
+# A lineage word names a relationship between existing facts (supersession, pairing, chain) rather than
+# a new store write (2026-10-11 review #166). "Resolved" alone is not one: a consolidate job reports its
+# OWN merges under "Contradictions resolved this run", and while every resolv* form counted as lineage
+# "Resolved: fid 4600 → fid 4601" passed with an empty ledger (2026-11-20 review). Only a resolution the
+# line itself dates before this run is lineage: "already resolved earlier by fid 4827", "3 items resolved
+# earlier by <session>" (2026-11-19 consolidate-synthesize, cron review #278), "previously resolved". The
+# word ends at "resolved" in every form, so the 25-char gap of the pair rule below is measured from
+# there, as it was before. A phrase that goes on to name this run is a claim: "resolved earlier this
+# run", "already resolved (this run)", "already resolved in the current run", "already resolved tonight",
+# "resolved above". "This week" or "this morning" is not this run, and "resolved earlier today by
+# <session>" credits someone else and stays lineage, unless the "by" names this run or what it did
+# ("tonight by merging", "today by this job").
+_PROSE_SETTLED_EARLIER = r"(?:already|previously)[ \t]+resolved|resolved(?=[ \t]+(?:earlier|previously)\b)"
+_PROSE_OTHER_ACTOR = (r"[ \t]+by[ \t]+(?!\w+ing\b|this\b|me\b|us\b|my\b|our\b"
+                      r"|the[ \t]+(?:(?:current|same)[ \t]+)?(?:run|job|session)\b)")
+_PROSE_THIS_RUN = (r"(?:(?:earlier|previously)[ \t,]+)?"
+                   r"(?:(?:(?:in|during)[ \t]+)?(?:this|the(?:[ \t]+(?:current|same))?)[ \t]+(?:run|session|pass|job)\b"
+                   rf"|(?:tonight|today)\b(?!{_PROSE_OTHER_ACTOR})|above\b)")
+_PROSE_LINEAGE_WORD = (
+    r"\b(?:pairs?|chains?|supersed\w*|supersession|lineage"
+    rf"|(?:{_PROSE_SETTLED_EARLIER})(?![ \t(—–,:;-]+{_PROSE_THIS_RUN}))\b"
+)
 # A short count of the chain's members may sit between the lineage word and the pair: "The
 # supersession chain across 4 facts (4229→4232)" (2026-11-01 consolidate) was read as the claim
 # "→ 4229" because the digit blocked the 25-char gap. The gap AFTER the count is 3 characters, so
@@ -3111,7 +3130,8 @@ _PROSE_LINEAGE_BULLET = re.compile(
 # characters after "chain", past the 25-char gap above, and it was read as the claim "→ 4440". A claim
 # verb leading into the parenthesis states a write: "… were merged (4440 → 4441)" stays a claim.
 # A comma-separated list of pairs inside the parens ("fids 4690→4827, 4725→4828, 4813→4826", 2026-11-20
-# review #278) blanks as one group.
+# review #278) blanks as one group. A line that only says "resolved" names no lineage, so
+# "Resolved duplicates (4900 → 4901, 4902 → 4903)" stays a claim.
 _PROSE_LINEAGE_LINE = re.compile(_PROSE_LINEAGE_WORD, re.IGNORECASE)
 _PROSE_PAREN_PAIR = re.compile(rf"\((?P<pair>{_PROSE_PAIR}(?:\s*[,;]\s*{_PROSE_PAIR})*)\)", re.IGNORECASE)
 _PROSE_VERB_INTO_PAREN = re.compile(rf"\b(?:{_PROSE_CLAIM_VERBS})\b[^\d\n(]{{0,25}}$", re.IGNORECASE)
@@ -3120,7 +3140,7 @@ _PROSE_VERB_INTO_PAREN = re.compile(rf"\b(?:{_PROSE_CLAIM_VERBS})\b[^\d\n(]{{0,2
 # claim "→ 4500". Nouns only: "3381 → 3391 superseded" reports a result and stays a claim, and a claim
 # verb leading into the pair states a write as above: "merged 4440 → 4441 chain" stays a claim.
 _PROSE_PAIR_BEFORE_LINEAGE = re.compile(
-    rf"(?P<pair>{_PROSE_PAIR})[ \t()]{{0,3}}\b(?:pairs?|chains?|supersessions?|lineage|resolutions?)\b", re.IGNORECASE)
+    rf"(?P<pair>{_PROSE_PAIR})[ \t()]{{0,3}}\b(?:pairs?|chains?|supersessions?|lineage)\b", re.IGNORECASE)
 
 
 def _blank_paren_pairs(line: str, rx: Optional[re.Pattern] = None) -> str:
