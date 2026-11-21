@@ -173,6 +173,22 @@ _PS_INCLUDE_NARROWS = r'(?!(?!(?:[^\r\n;&|]*\s)?(?:/s\b|--(?:\s|$)))(?:[^\r\n;&|
 # Package-manager global options, each optionally taking ONE non-dash operand.
 _PKG_OPTS = r'(?:-[^\s]+(?:\s+[^-\s][^\s]*)?\s+)*'
 
+# A Hermes database as sqlite3 is handed it. Absolute spellings are folded to ~/.hermes/ by
+# _normalize_command_for_detection; the module sees no cwd, so a relative path counts only in the shapes Hermes
+# stores take (known store names, or under cron/ state/ memories/ agent-traces/ backups/).
+_HERMES_DB = (
+    r'["\']?(?:(?:~|\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/'
+    r'|(?:\./)?(?:(?:cron|state|memories|agent-traces|backups)/[^\s"\']*\.(?:db|sqlite3?)'
+    r'|(?:memory_store|state|executions|deliveries|notepad|docs_index|kanban|projects|response_store|shared-state'
+    r'|verification_evidence)\.(?:db|sqlite3?)))'
+)
+
+
+def _sqlite_hermes_db_without(flag):
+    """sqlite3 reaching a Hermes database with *flag* absent from its leading options (each may take one operand)."""
+    return (_CMDPOS + r'sqlite3\s+(?:-(?!-?' + flag + r'\b)\S+(?:\s+(?:"[^"]*"|\'[^\']*\'|[^-\s]\S*))?\s+)*'
+            + _HERMES_DB)
+
 HARDLINE_PATTERNS = [
     # Root path: any root-anchored path whose components collapse to "/" in the shell ("/", "//",
     # "/.", "/./", "/../..", optional trailing glob). Each inter-slash segment must be exactly "."
@@ -979,15 +995,16 @@ DANGEROUS_PATTERNS = [
     (_CMDPOS + r'pip(?:3)?\s+' + _PKG_OPTS + r'uninstall\b', "package manager uninstall"),
     (_CMDPOS + r'brew\s+' + _PKG_OPTS + r'(?:uninstall|remove|rm)\b', "package manager uninstall"),
     # sqlite3 opening a Hermes database without -readonly among its leading options: it can create files or write
-    # rows the store's own writers (HRR vectors, validity windows) would have encoded. Absolute spellings are folded
-    # to ~/.hermes/ by _normalize_command_for_detection; the module sees no cwd, so a relative path counts only in
-    # the shapes Hermes stores take (known store names, or under cron/ state/ memories/ agent-traces/ backups/).
-    (_CMDPOS + r'sqlite3\s+(?:-(?!-?readonly\b)\S+(?:\s+(?:"[^"]*"|\'[^\']*\'|[^-\s]\S*))?\s+)*["\']?'
-     r'(?:(?:~|\$home|\$\{home\})/\.hermes/|(?:\$hermes_home|\$\{hermes_home\})/'
-     r'|(?:\./)?(?:(?:cron|state|memories|agent-traces|backups)/[^\s"\']*\.(?:db|sqlite3?)'
-     r'|(?:memory_store|state|executions|deliveries|notepad|docs_index|kanban|projects|response_store|shared-state'
-     r'|verification_evidence)\.(?:db|sqlite3?)))',
-     "sqlite3 on a Hermes database without -readonly"),
+    # rows the store's own writers (HRR vectors, validity windows) would have encoded.
+    (_sqlite_hermes_db_without('readonly'), "sqlite3 on a Hermes database without -readonly"),
+    # ...and without -safe: -readonly alone still lets a dot-command in the same call reopen the file writable
+    # (.open), run a shell command (.shell) or write a file (.output). Safe mode refuses those, ATTACH, readfile()
+    # and writefile(); .schema, .tables, .mode and PRAGMA reads keep working.
+    (_sqlite_hermes_db_without('safe'), "sqlite3 on a Hermes database without -safe"),
+    # -init FILE runs its file before safe mode starts, and -nonce lets a dot-command suspend it, wherever the
+    # option stands on the command line.
+    (_CMDPOS + r'sqlite3(?=[^;|&\n]*?\s--?(?:init|nonce)\b)\s[^;|&\n]*?(?<=\s)' + _HERMES_DB,
+     "sqlite3 on a Hermes database with -init or -nonce"),
 ]
 
 

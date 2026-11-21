@@ -2110,7 +2110,7 @@ class TestCliApprovalTimeoutClassifiedSeparately:
 
 
 class TestSqliteHermesDbWithoutReadonly:
-    """sqlite3 on a database under ~/.hermes needs -readonly among its leading options (#227)."""
+    """sqlite3 on a database under ~/.hermes needs -readonly and -safe among its leading options (#227)."""
 
     @pytest.mark.parametrize("command", [
         'sqlite3 ~/.hermes/memory_store.db "SELECT 1"',
@@ -2129,16 +2129,49 @@ class TestSqliteHermesDbWithoutReadonly:
         assert dangerous and key == "sqlite3 on a Hermes database without -readonly"
 
     @pytest.mark.parametrize("command", [
-        'sqlite3 -readonly ~/.hermes/memory_store.db "SELECT 1"',
-        'sqlite3 -header -readonly ~/.hermes/memory_store.db "SELECT 1"',
-        'sqlite3 -readonly -header -column ~/.hermes/cron/executions.db "SELECT 1"',
-        'sqlite3 --readonly $HOME/.hermes/state.db "SELECT 1"',
-        'sqlite3 -readonly memory_store.db "SELECT 1"',
+        'sqlite3 -readonly -safe ~/.hermes/memory_store.db "SELECT 1"',
+        'sqlite3 -header -readonly -safe ~/.hermes/memory_store.db "SELECT 1"',
+        'sqlite3 -readonly -safe -header -column ~/.hermes/cron/executions.db "SELECT 1"',
+        'sqlite3 --readonly --safe $HOME/.hermes/state.db "SELECT 1"',
+        'sqlite3 -safe -readonly memory_store.db "SELECT 1"',
+        'sqlite3 -readonly -safe -cmd ".timeout 5" ~/.hermes/state.db ".schema messages"',
+        'sqlite3 -readonly -safe ~/.hermes/state.db "SELECT \'-init\'"',
         'sqlite3 /tmp/scratch.db "SELECT 1"',
         'sqlite3 ~/projects/foo/state.db "SELECT 1"',
         'sqlite3 /tmp/state.db "SELECT 1"',
+        'sqlite3 -init setup.sql /tmp/state.db "SELECT 1"',
         'echo "sqlite3 ~/.hermes/state.db"',
         'git commit -m "sqlite3 ~/.hermes/state.db"',
     ])
-    def test_readonly_and_other_databases_stay_unprompted(self, command):
+    def test_readonly_safe_and_other_databases_stay_unprompted(self, command):
         assert detect_dangerous_command(command) == (False, None, None)
+
+    @pytest.mark.parametrize("command", [
+        'sqlite3 -readonly ~/.hermes/memory_store.db "SELECT 1"',
+        'sqlite3 -header -readonly ~/.hermes/memory_store.db "SELECT 1"',
+        'sqlite3 --readonly $HOME/.hermes/state.db "SELECT 1"',
+        'sqlite3 -readonly memory_store.db "SELECT 1"',
+        'cd ~/.hermes && sqlite3 -readonly cron/executions.db ".open cron/executions.db"',
+        'sqlite3 -readonly ~/.hermes/state.db ".shell touch x"',
+        'sqlite3 -readonly ~/.hermes/state.db ".output /tmp/x" "SELECT 1"',
+        'echo ".open state.db" | sqlite3 -readonly ~/.hermes/state.db',
+    ])
+    def test_readonly_without_safe_requires_approval(self, command):
+        """-readonly alone leaves .open, .shell and .output usable in the same call."""
+        dangerous, key, _ = detect_dangerous_command(command)
+        assert dangerous and key == "sqlite3 on a Hermes database without -safe"
+
+    def test_safe_without_readonly_still_names_the_readonly_rule(self):
+        dangerous, key, _ = detect_dangerous_command('sqlite3 -safe ~/.hermes/state.db "SELECT 1"')
+        assert dangerous and key == "sqlite3 on a Hermes database without -readonly"
+
+    @pytest.mark.parametrize("command", [
+        'sqlite3 -readonly -safe -init setup.sql ~/.hermes/state.db "SELECT 1"',
+        'sqlite3 -init setup.sql -readonly -safe memory_store.db "SELECT 1"',
+        'sqlite3 -readonly -safe ~/.hermes/state.db "SELECT 1" -init setup.sql',
+        'sqlite3 -readonly -safe --init setup.sql cron/executions.db',
+        'sqlite3 -readonly -safe -nonce k9 ~/.hermes/state.db ".nonce k9" ".shell touch x"',
+    ])
+    def test_init_and_nonce_switch_safe_mode_off(self, command):
+        dangerous, key, _ = detect_dangerous_command(command)
+        assert dangerous and key == "sqlite3 on a Hermes database with -init or -nonce"
