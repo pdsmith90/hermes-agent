@@ -248,7 +248,8 @@ _SHELL_NAMES_RE = "|".join(_SHELL_NAMES)
 # `-u USER`, `-g`, `-C` ... -- a bare flag, VAR=value, a duration) inside atomic/possessive
 # groups, so each token has one parse and the scan stays linear; `sudo -u bash cat` reads `bash`
 # as the user, not the shell.
-_PIPE_SHELL_NAMES_RE = "|".join((*_SHELL_NAMES, "fish", "csh", "tcsh", "ash"))
+# Fork: mksh too, as the fork's own pipe rule had it before this sink replaced that rule.
+_PIPE_SHELL_NAMES_RE = "|".join((*_SHELL_NAMES, "fish", "csh", "tcsh", "ash", "mksh"))
 _PIPE_SHELL_TOKEN_RE = (
     rf"['\"]?{_PIPE_PATH_PREFIX_RE}(?:{_PIPE_SHELL_NAMES_RE})(?:\.exe)?(?=['\"\s;&|<>)`]|$)"
 )

