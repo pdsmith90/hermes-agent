@@ -61,8 +61,9 @@ _BENIGN = (
     "cp {h}/state.db /tmp/backup.db 2>/dev/null  # backup",
     "cp {h}/state.db {h}/state.db.bak 2>&1",
     "cp {h}/state.db /tmp/b.db\ncp {h}/state.db-wal /tmp/b.db-wal",
-    'sqlite3 {h}/state.db "select count(*) from messages"',
-    "sqlite3 {h}/state.db .schema",
+    # Fork: sqlite3 on a Hermes store needs -readonly to stay clean (the fork's own rule asks otherwise).
+    'sqlite3 -readonly {h}/state.db "select count(*) from messages"',
+    "sqlite3 -readonly {h}/state.db .schema",
     "cat {h}/state.db",
     "ls {h}",
     "cd {h} && git status",
@@ -88,9 +89,9 @@ _BENIGN = (
     # Moving something INTO the home and the VACUUM INTO backup destroy nothing.
     "mv /tmp/skill {h}/",
     "mv /tmp/skill ~/.hermes",
-    'sqlite3 {h}/state.db "VACUUM INTO \'/tmp/b.db\'"',
-    'sqlite3 {h}/state.db "vacuum main into \'/tmp/b.db\'"',
-    'sqlite3 {h}/state.db <<< "select count(*) from messages"',
+    'sqlite3 -readonly {h}/state.db "VACUUM INTO \'/tmp/b.db\'"',
+    'sqlite3 -readonly {h}/state.db "vacuum main into \'/tmp/b.db\'"',
+    'sqlite3 -readonly {h}/state.db <<< "select count(*) from messages"',
 )
 
 
