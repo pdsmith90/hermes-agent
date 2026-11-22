@@ -48,10 +48,14 @@ async def shell_exec(connection, ref, params):
     backend = str(json.loads(policy.terminal_json).get('TERMINAL_ENV') or '').strip().lower()
     if backend not in _LOCAL_BACKENDS:
         raise AuthorityRefusal('unsupported_terminal_backend', field='terminal.backend', detail=backend)
-    from tools.approval_detection import detect_dangerous_command, detect_hardline_command
+    from tools.approval_detection import (
+        detect_dangerous_command, detect_hardline_command, detect_remote_exec_command)
     # No prompt here, so anything the agent's gate would ask about is refused, including a command
     # the scanners could not read to the end (detect_dangerous_command reports that too).
-    if detect_hardline_command(command)[0] or detect_dangerous_command(command)[0]:
+    # Fork: the fetch-and-execute floor too. It blocks forms the approvable layer does not flag,
+    # such as a fetch quoted into ssh, su or a container exec.
+    if (detect_hardline_command(command)[0] or detect_dangerous_command(command)[0]
+            or detect_remote_exec_command(command)[0]):
         raise AuthorityRefusal('dangerous_command')
     return await asyncio.to_thread(_run, command, policy.cwd)
 
