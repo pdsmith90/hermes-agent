@@ -126,6 +126,44 @@ class TestProseCheckPure:
         claimed = {int(n) for n in re.findall(r"→ (\d+)", problems[0])}
         assert claimed == ids, problems
 
+    @pytest.mark.parametrize("retired", [
+        # 2026-11-27 dream-and-promote (cron review): the one lineage pair at the end of the retired
+        # list made the arrow rule claim every id in it ("claims → 905, → 906, … but the store recorded
+        # no such write"); the run wrote 5057-5059 and updated 1317 only.
+        "**ALREADY RETIRED (trust < 0.3 or valid_until set — no action):**\n"
+        "fids 905, 906, 907, 908, 911, 1463, 1591→1592, 1752, 2154",
+        "**Already retired:** fids 905, 906, 1591→1592, 1752",                 # the list on the header line
+        "Already retired (no action):\nfids 905, 906, 1591→1592, 1752.",       # a closing period
+    ])
+    def test_a_list_of_ids_retired_before_the_run_is_not_a_claim(self, retired):
+        resp = retired + "\n\n(2) Promoted this run: fid 1317 → memory-entry fid 5057."
+        assert _prose_check(resp, _rows(5057), [], _rows(1317), [], [])[0] == []
+
+    @pytest.mark.parametrize("resp, ids", [
+        ("Checked:\nfids 905, 1591→1592", {905, 1591}),                           # no settled header
+        ("Already retired this run:\nfids 905, 1591→1592", {905, 1591}),          # this run is not before it
+        ("Already retired by this job:\nfids 905, 1591→1592", {905, 1591}),
+        ("Already retired now:\nfids 905, 1591→1592", {905, 1591}),
+        ("Already retired:\nfids 905, 1591→1592 demoted", {905, 1591}),           # a word on the id line
+        ("Already retired:\nfids 905, 1591→1592\nfid 3990 → researched", {3990}),  # one line only
+        ("Already retired (no action):\nfids 905, 906\n4440 → 4441\n4442 → 4443", {4440, 4442}),
+        ("Already retired (no action):\n- fid 905\n4440 → 4441", {4440}),          # not the next line
+        ("Already retired:\n4440 → 4441", {4440}),                                 # pairs only
+        # 2026-11-27 review of the first version, which blanked such lines under ANY lineage header and
+        # made "already retired" a lineage word everywhere: every one of these is a write and stays a claim.
+        ("Merged duplicate pairs:\n4440 → 4441, 4442 → 4443", {4440, 4441, 4442}),
+        ("Promoted this run (skipping candidates already retired):\nfid 1317 → fid 5057", {1317}),
+        ("**Promotions (sources already retired):**\n1317 → 5057; 1318 → 5058", {1317, 1318}),
+        ("Previously retired: 4440 → 4441", {4440}),
+        ("Retired earlier; merged 4440 → 4441", {4440}),
+        ("Merged 2 duplicates (4440 → 4441); 905 already retired.", {4440}),
+    ])
+    def test_only_that_list_is_exempt(self, resp, ids):
+        problems, _ = _prose_check(resp, [], [], [], [], [])
+        assert len(problems) == 1, problems
+        claimed = {int(n) for n in re.findall(r"→ (\d+)", problems[0])}
+        assert claimed == ids, problems
+
     @pytest.mark.parametrize("line", [
         # 2026-10-26 consolidate (cron review #218): read as the claim "→ 4071"
         "The OpenCode timeout chain (4071→4013/4062) was already handled by the prior run's correction mechanism.",

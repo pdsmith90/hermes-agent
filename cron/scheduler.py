@@ -3105,12 +3105,52 @@ def _blank_paren_pairs(line: str, rx: Optional[re.Pattern] = None) -> str:
     return "".join(out)
 
 
+# A list of facts a header says were retired before this run (2026-11-27 dream-and-promote, cron review):
+# "**ALREADY RETIRED (trust < 0.3 or valid_until set — no action):**" over "fids 905, 906, …, 1591→1592, …"
+# had its one lineage pair read by the arrow rule as a claim on every id before it. Narrow on purpose, since
+# the wider lineage exemptions have opened holes before (#279): the header must OPEN with "already/previously
+# retired" and carry no claim verb and no this-run phrase, and only ONE line is blanked: the rest of
+# the header line, or else the line right after it, and only when it holds nothing but ids, id → id pairs,
+# separators and a leading fid token, with at least one id outside a pair. "Retired" stays out of the general
+# lineage words, so every other rule reads it as before.
+_PROSE_SETTLED_LIST_HEAD = re.compile(
+    r"^(?P<head>[ \t>#*_+-]*(?:already|previously)[ \t]+retired\b[^\n:]*:[ \t*_]*)", re.IGNORECASE)
+# A write in the head refuses it, in any tense ("demoting", "superseding"), as does any "this" (this run,
+# this sweep), a time word or an id: the exemption is for a list the run did not touch, so err toward a claim.
+_PROSE_SETTLED_LIST_NOT = re.compile(
+    rf"\b(?:{_PROSE_CLAIM_VERBS})\b|{_PROSE_THIS_RUN}|\b\w+ing\b|\b(?:this|now|tonight|today)\b|\b\d{{3,6}}\b"
+    r"|\bby[ \t]+(?:me|us|my|our)\b", re.IGNORECASE)
+# Atomic items: _PROSE_FID_TOKEN can split one space between its two \s* in two ways, so a failing line of
+# "fid N → fid M" items backtracked 4^n ways (16 s at 12 pairs, 2026-11-27 review). The ids are greedy
+# and the arrows run to the end, so nothing inside an item ever needs to give characters back.
+_PROSE_SETTLED_ITEM = (rf"(?>(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}}"
+                       rf"(?:\s*(?:→|->)\s*(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}})*)(?!\d|\.\d)")
+_PROSE_SETTLED_ID_LIST = re.compile(
+    rf"[ \t]*(?>(?:{_PROSE_FID_TOKEN})?){_PROSE_SETTLED_ITEM}(?:\s*[,;]\s*{_PROSE_SETTLED_ITEM})*[ \t.]*$", re.IGNORECASE)
+_PROSE_SETTLED_PAIR_RUN = re.compile(
+    rf"(?>(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}}(?:\s*(?:→|->)\s*(?:{_PROSE_PAIR_ID_TOKEN})?\d{{3,6}})+)", re.IGNORECASE)
+
+
+def _blank_settled_id_lists(text: str) -> str:
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        m = _PROSE_SETTLED_LIST_HEAD.match(line)
+        if not m or _PROSE_SETTLED_LIST_NOT.search(m.group("head")):
+            continue
+        rest = line[m.end():]
+        target, prefix = (i, line[:m.end()]) if rest.strip() else (i + 1, "")
+        body = rest if rest.strip() else (lines[i + 1] if i + 1 < len(lines) else "")
+        if _PROSE_SETTLED_ID_LIST.match(body) and re.search(r"\d{3,6}", _PROSE_SETTLED_PAIR_RUN.sub(" ", body)):
+            lines[target] = prefix + " "
+    return "\n".join(lines)
+
+
 def _blank_lineage_pairs(text: str) -> str:
     """Blank the id pairs a lineage word introduces — inline, as a bulleted list under a lineage
     header, parenthesised anywhere on a line that names a lineage, or right before a lineage noun — so the arrow rule does not
     read "3837 → 3839" as a write. Only the pair itself is blanked: the rest of a bullet line can
     still carry a claim."""
-    lines = _PROSE_LINEAGE_PAIRS.sub(" ", text).split("\n")
+    lines = _PROSE_LINEAGE_PAIRS.sub(" ", _blank_settled_id_lists(text)).split("\n")
     in_list = False
     for i, line in enumerate(lines):
         if in_list:
