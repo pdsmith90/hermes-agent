@@ -170,8 +170,9 @@ def test_deny_projection_preserves_data_and_path_rules(deny_config):
 
 def test_git_global_options_do_not_hide_the_subcommand(deny_config):
     """2026-11-27 cron review: `git -C <repo> checkout` slid past `*git checkout*` (the guard and the
-    nightly command audit both missed it). git's global options are dropped wherever `git` stands, as
-    the globs match anywhere; an option's value is never read as the subcommand."""
+    nightly command audit both missed it). git's global options are dropped wherever `git` stands in a
+    form that keeps its quotes, as the globs match anywhere, and in the dequoted form only at a git
+    command word; an option's value is never read as the subcommand."""
     deny_config(["*git checkout*", "*git switch*", "*git stash*", "*git reset --hard*", "git status"])
     for command, rule in (
         ("git -C ~/repo checkout main", "*git checkout*"),
@@ -194,6 +195,12 @@ def test_git_global_options_do_not_hide_the_subcommand(deny_config):
         ("git -C checkout status", "git status"),
         ("git -P -c x=1 stash", "*git stash*"),
         ("git --bare --git-dir=/r.git switch m", "*git switch*"),
+        ("git -C r 'checkout' x", "*git checkout*"),
+        # an inline alias is expanded
+        ("git -c alias.co=checkout co main", "*git checkout*"),
+        ("git -c 'alias.sw=switch' -C r sw dev", "*git switch*"),
+        ("git -c alias.st='stash push' st", "*git stash*"),
+        ("git -c alias.x='!git checkout' x main", "*git checkout*"),
     ):
         assert approval_floors._match_user_deny_rule(command) == rule, command
     for command in ("git -C ~/repo ls-tree abc123 src/", "git -C ~/repo grep -n checkout abc123",
@@ -201,7 +208,10 @@ def test_git_global_options_do_not_hide_the_subcommand(deny_config):
                     "git -C", "git -C ~/r", "legit -C r checkout x", "git-lfs -C r checkout x",
                     # only git's own flags count: these name git as data (2026-11-27 review)
                     "grep -n -e git -e checkout notes.md", "rg -e git -e switch src/",
-                    "find . -name git -prune -o -name stash -print", "cat git -n checkout.txt"):
+                    "find . -name git -prune -o -name stash -print", "cat git -n checkout.txt",
+                    # removing the quotes must not glue a quoted pattern to the next word
+                    'grep -n "git -C" -A3 checkout.sh', 'grep -c "git -p" stash.log',
+                    "git -c alias.co=checkout log -5"):
         assert approval_floors._match_user_deny_rule(command) is None, command
 
 

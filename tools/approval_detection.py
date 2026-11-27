@@ -1714,22 +1714,38 @@ def _dequoted_escape(char: str, quote: str | None) -> str:
 
 # git's global options (git.c handle_options) stand between `git` and its subcommand, so
 # `git -C ~/repo checkout main` met no `*git checkout*` deny rule (2026-11-27 cron review: the 11-26
-# experiment-design prompts send cron into project repos with `git -C`). Dropped wherever `git` stands in
-# the text, the way the deny globs themselves match anywhere, so `eval`, `xargs`, `ssh host '…'` and
-# `submodule foreach` carry it too. An option that takes the next word consumes it and is never re-read
-# as a bare flag, so `git -C checkout status` (a repo named "checkout") stays `git status`.
-# Only git's own flags count, so `grep -n -e git -e checkout notes.md` is not read as git (review 2026-11-27).
+# experiment-design prompts send cron into project repos with `git -C`). The deny variants carry a copy
+# with them dropped. Only git's own flags and value options count, so `grep -n -e git -e checkout f` is
+# not read as git, and an option that takes the next word consumes it, so `git -C checkout status` (a
+# repo named "checkout") stays `git status`. An inline alias (`-c alias.co=checkout co`) is expanded.
 _GIT_OPTIONS_WITH_ARG = r"(?:-C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--shallow-file|--attr-source)"
 _GIT_FLAGS = (r"(?:-p|-P|--paginate|--no-pager|--bare|--no-replace-objects|--no-lazy-fetch|--no-optional-locks"
               r"|--no-advice|--(?:literal|glob|noglob|icase)-pathspecs|--exec-path(?:=\S+)?"
               r"|--(?:git-dir|work-tree|namespace|config-env|super-prefix|shallow-file|attr-source)=\S+)(?=\s|$)")
+_GIT_OPTION_VALUE = r"(?:[^\s'\"]*'[^']*'\S*|[^\s'\"]*\"[^\"]*\"\S*|\S+)"
 _GIT_GLOBAL_OPTIONS_RE = re.compile(
-    rf"\bgit(?>\s+(?:{_GIT_OPTIONS_WITH_ARG}\s+(?:[^\s'\"]*'[^']*'\S*|[^\s'\"]*\"[^\"]*\"\S*|\S+)|{_GIT_FLAGS}))+(?=\s)")
+    rf"\bgit(?P<opts>(?>\s+(?:{_GIT_OPTIONS_WITH_ARG}\s+{_GIT_OPTION_VALUE}|{_GIT_FLAGS}))+)"
+    r"(?P<sp>\s+)(?P<sub>[^\s;&|()<>'\"]*)")
+_GIT_INLINE_ALIAS_RE = re.compile(rf"(?:^|\s)-c\s+(?P<value>{_GIT_OPTION_VALUE})")
 
 
-def git_global_options_dropped(command: str) -> str:
-    """The command with git's global options removed after every `git` word (unchanged if none)."""
-    return _GIT_GLOBAL_OPTIONS_RE.sub("git", command)
+def _git_projection(m: re.Match) -> str:
+    aliases = {}
+    for a in _GIT_INLINE_ALIAS_RE.finditer(m.group("opts")):
+        key, eq, value = a.group("value").replace("'", "").replace('"', "").partition("=")
+        if eq and key.lower().startswith("alias."):
+            aliases[key[len("alias."):].lower()] = value
+    sub = m.group("sub")
+    return "git" + m.group("sp") + aliases.get(sub.lower(), sub)
+
+
+def git_global_options_dropped(command: str, *, anchored: bool = False) -> str:
+    """The command with git's global options removed after every `git` word (unchanged if none).
+    ``anchored``: only a `git` at the very start counts."""
+    if anchored:
+        m = _GIT_GLOBAL_OPTIONS_RE.match(command)
+        return command if m is None else _git_projection(m) + command[m.end():]
+    return _GIT_GLOBAL_OPTIONS_RE.sub(_git_projection, command)
 
 
 def _deny_command_variants(command: str):
@@ -1739,7 +1755,11 @@ def _deny_command_variants(command: str):
     the original quote state, preserve path-specific rules, and fold only the
     executable basename (never arbitrary argument paths).
     """
-    yield from _command_detection_variants(command, floors=True)
+    for variant in _command_detection_variants(command, floors=True):
+        yield variant
+        projected = git_global_options_dropped(variant)
+        if projected != variant:
+            yield projected
     # Heredoc bodies are masked first, then ANSI-C expanded: `$'...'` inside a body is literal data.
     pending = list(dict.fromkeys(
         expand_ansi_c_quotes(source) for source in heredoc_scan_sources(command, _SHELL_NAMES_RE, floors=True)))
@@ -1774,7 +1794,20 @@ def _deny_command_variants(command: str):
                 yield name + "".join(bare)
                 # Apply the existing text matching semantics only AFTER locating
                 # executable positions; never parse its rewritten quotes again.
-                yield _normalize_command_for_detection(candidate)
+                normalized = _normalize_command_for_detection(candidate)
+                yield normalized
+                # git's global options dropped: in the forms that keep their quotes wherever `git`
+                # stands; in the dequoted one only when this word is git, since removing the quotes
+                # glues a quoted pattern to the next word (`grep -n "git -C" -A3 checkout.sh`).
+                for form in (candidate, normalized):
+                    projected = git_global_options_dropped(form)
+                    if projected != form:
+                        yield projected
+                if os.path.basename(name).lower() == "git":
+                    dequoted = "git" + "".join(bare)
+                    projected = git_global_options_dropped(dequoted, anchored=True)
+                    if projected != dequoted:
+                        yield projected
             if os.path.basename(executable) == "env":
                 tokens = _shell_segment_tokens(segment, 0)
                 if tokens:

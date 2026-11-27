@@ -17,8 +17,7 @@ from tools import approval_context as _ctx
 from tools.approval_ansi_c import expand_ansi_c_quotes
 from utils import unlink_files_older_than
 from tools.approval_detection import (
-    _FALLBACK_MATCH_SUFFIX, _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION, _deny_command_variants,
-    git_global_options_dropped)
+    _FALLBACK_MATCH_SUFFIX, _MALFORMED_EXEC_DESCRIPTION, _PARSER_LIMIT_DESCRIPTION, _deny_command_variants)
 
 logger = logging.getLogger("tools.approval")
 
@@ -44,12 +43,9 @@ def _match_user_deny_rule(command: str) -> str | None:
         # pattern. Test the whitespace-collapsed form too; for a single-spaced command it is the
         # same string, so no existing match changes.
         collapsed = " ".join(candidate.split())
-        # git's global options removed, so `git -C <repo> checkout` meets a `*git checkout*` rule
-        # (2026-11-27 cron review). Only adds strings to test: every form above is still tested.
-        forms = list(dict.fromkeys((candidate, collapsed, git_global_options_dropped(collapsed))))
         for pattern in globs:
             lowered = pattern.lower()
-            if any(fnmatch.fnmatchcase(form, lowered) for form in forms):
+            if fnmatch.fnmatchcase(candidate, lowered) or fnmatch.fnmatchcase(collapsed, lowered):
                 return pattern
     return None
 
