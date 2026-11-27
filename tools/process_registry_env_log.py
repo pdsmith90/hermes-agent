@@ -41,8 +41,12 @@ def log_delta_command(quoted_log_path: str, offset: int, quoted_pid_path: str, q
     seam): up to 3 trailing continuation bytes are held for the next poll and the
     header reports the trimmed size. After an exit no poll follows, so nothing is
     held back and a truncated trailing sequence is delivered (decoded as U+FFFD)."""
+    # The pid is cut to its digits and an empty one reads as exited before `kill` sees it: bash 5.3 as
+    # /bin/sh (POSIX mode) exits 0 from `kill -0 ""` and `kill -0 abc` after printing an error, so an empty
+    # or garbled pid file read as running forever (2026-11-27; `bash -c`, dash and /usr/bin/kill exit 1).
     return (
-        f'if kill -0 "$(cat {quoted_pid_path} 2>/dev/null)" 2>/dev/null; then T=run; '
+        f"K=$(cat {quoted_pid_path} 2>/dev/null | tr -dc '0-9'); "
+        f'if [ -n "$K" ] && kill -0 "$K" 2>/dev/null; then T=run; '
         f"else T=\"exit:$(cat {quoted_exit_path} 2>/dev/null | tr -dc '0-9')\"; fi; "
         f"O={offset}; "
         f"S=$({{ wc -c < {quoted_log_path}; }} 2>/dev/null | tr -dc '0-9'); "

@@ -337,3 +337,19 @@ class TestEnvPollerIncrementalRead:
         cmd = log_delta_command(q(log), 0, q(tmp_path / "bg.pid"), q(tmp_path / "bg.exit"))
         out = subprocess.run(["sh", "-c", cmd], capture_output=True, timeout=30, check=False).stdout
         assert out == b"3 0 exit:0\nok\xc3"
+
+    @pytest.mark.parametrize("pid", ["", "abc\n", " \n"])
+    @pytest.mark.parametrize("shell", [["sh", "-c"], ["bash", "-c"], ["bash", "--posix", "-c"], ["dash", "-c"]])
+    def test_an_empty_or_garbled_pid_reads_as_exited(self, tmp_path, pid, shell):
+        """bash 5.3 in POSIX mode (it is /bin/sh on Arch) exits 0 from `kill -0 ""` and `kill -0 abc`, so
+        such a pid file read as running forever; every shell must report the exit."""
+        if not shutil.which(shell[0]):
+            pytest.skip(f"needs {shell[0]}")
+        log = tmp_path / "bg.log"
+        log.write_bytes(b"done\n")
+        (tmp_path / "bg.exit").write_text("4\n")
+        (tmp_path / "bg.pid").write_text(pid)
+        q = lambda p: shlex.quote(str(p))
+        cmd = log_delta_command(q(log), 0, q(tmp_path / "bg.pid"), q(tmp_path / "bg.exit"))
+        out = subprocess.run(shell + [cmd], capture_output=True, timeout=30, check=False).stdout
+        assert out == b"5 0 exit:4\ndone\n"
