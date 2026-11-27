@@ -2899,12 +2899,15 @@ _PROSE_CLAIM_VERBS = (
     r"stored|wrote|written|created|added|queued|re-?queued|promoted|demoted|removed|deleted|"
     r"merged|updated|boosted|bumped|enriched"
 )
-_PROSE_FID_TOKEN = r"(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*"
+# Atomic: the two \s* can share one space two ways, so a failing line of "fid N, fid N, …" backtracked
+# 2^n ways in the arrow rule (0.75 s at 20 items, more than 5 s at 24; 2026-11-27 review). A digit always
+# follows the token, so it never has to give whitespace back.
+_PROSE_FID_TOKEN = r"(?>(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*)"
 # an id list: "3323/3324", "871, 872, 893", "fid 893 and fid 892" — every number inside it is a claim
 # (?!\d|-\d): a number that continues as a date ("2026-10-05") or a range ("4430-4438") is never an id,
 # and neither are its leading digits: with (?!-\d) alone \d{1,6} backed off one digit, so the range was read
 # as fid 443 and the date as fid 202 (2026-11-10 session-distill, cron review #269).
-_PROSE_ID_LIST = r"\d{1,6}(?!\d|-\d)(?:\s*(?:[,/]|and|&)\s*(?:(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*)?\d{1,6}(?!\d|-\d))*"
+_PROSE_ID_LIST = r"\d{1,6}(?!\d|-\d)(?:\s*(?:[,/]|and|&)\s*(?>(?:fids?|fact_ids?|facts?)\s*[=:#]?\s*)?\d{1,6}(?!\d|-\d))*"
 # a bare list (no fid token) must look like fids: 3+ digits, so "open-question 6 → 5" is a count, not a claim
 _PROSE_BARE_LIST = r"\d{3,6}(?!\d|-\d)(?:\s*[,/]\s*\d{3,6}(?!\d|-\d))*"
 # "stored fid=3325", "Demoted predecessor fid=3273", "removed fid 893 and fid 892": verb, a short digit-free

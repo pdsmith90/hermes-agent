@@ -164,6 +164,16 @@ class TestProseCheckPure:
         claimed = {int(n) for n in re.findall(r"→ (\d+)", problems[0])}
         assert claimed == ids, problems
 
+    @pytest.mark.parametrize("head", ["Checked:\n", "Already retired:\n", "**Already retired:** "])
+    def test_a_long_fid_list_that_fails_to_match_is_fast(self, head):
+        # 2026-11-27 review: the fid token's two \s* split a space two ways, so the arrow rule backtracked
+        # 2^n ways on "fid N, fid N, …" with no arrow after it (0.75 s at 20 items, over 5 s at 24)
+        import time
+        resp = head + ", ".join(f"fid {900 + i}" for i in range(22)) + " (no action)"
+        start = time.monotonic()
+        _prose_check(resp, [], [], [], [], [])
+        assert time.monotonic() - start < 1.0
+
     @pytest.mark.parametrize("line", [
         # 2026-10-26 consolidate (cron review #218): read as the claim "→ 4071"
         "The OpenCode timeout chain (4071→4013/4062) was already handled by the prior run's correction mechanism.",
