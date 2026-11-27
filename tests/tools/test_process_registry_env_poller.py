@@ -229,7 +229,7 @@ class TestEnvPollerIncrementalRead:
                 {"output": "3 0 exit:2\nend"},
             ],
         )
-        assert "kill -0" in commands[1]
+        assert commands[1].startswith("kill -0")
         assert session.output_buffer == "end"
         assert session.exit_code == 2
 

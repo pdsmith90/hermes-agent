@@ -89,10 +89,11 @@ def fallback_exit_code(env: Any, quoted_pid_path: str, quoted_exit_path: str) ->
     """Separate liveness and exit-code reads for a reply the combined command
     could not deliver, so a backend that mangles it still sees the exit.
     ``None`` while the process looks alive, else the recorded code (-1 if none)."""
-    # the same digit cut as log_delta_command: bash 5.3 as /bin/sh exits 0 from `kill -0 ""`
+    # The same digit cut as log_delta_command, and an empty pid is not alive: bash 5.3 as /bin/sh exits 0
+    # from `kill -0 ""`. The command still opens with `kill -0`, the shape the backends' fakes key on.
+    pid = f"$(cat {quoted_pid_path} 2>/dev/null | tr -dc '0-9')"
     check = env.execute(
-        f"K=$(cat {quoted_pid_path} 2>/dev/null | tr -dc '0-9'); "
-        f"[ -n \"$K\" ] && kill -0 \"$K\" 2>/dev/null; echo $?", cwd="/", timeout=5)
+        f"kill -0 \"{pid}\" 2>/dev/null && [ -n \"{pid}\" ]; echo $?", cwd="/", timeout=5)
     check_output = check.get("output", "").strip()
     if not check_output or check_output.splitlines()[-1].strip() == "0":
         return None
