@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from tools.process_registry import ProcessRegistry, ProcessSession
-from tools.process_registry_env_log import log_delta_command, parse_log_delta_reply
+from tools.process_registry_env_log import fallback_exit_code, log_delta_command, parse_log_delta_reply
 
 
 @pytest.fixture()
@@ -229,7 +229,7 @@ class TestEnvPollerIncrementalRead:
                 {"output": "3 0 exit:2\nend"},
             ],
         )
-        assert commands[1].startswith("kill -0")
+        assert "kill -0" in commands[1]
         assert session.output_buffer == "end"
         assert session.exit_code == 2
 
@@ -337,6 +337,22 @@ class TestEnvPollerIncrementalRead:
         cmd = log_delta_command(q(log), 0, q(tmp_path / "bg.pid"), q(tmp_path / "bg.exit"))
         out = subprocess.run(["sh", "-c", cmd], capture_output=True, timeout=30, check=False).stdout
         assert out == b"3 0 exit:0\nok\xc3"
+
+    @pytest.mark.parametrize("pid", ["", "abc\n", " \n"])
+    def test_the_fallback_read_also_takes_an_empty_pid_as_exited(self, tmp_path, pid):
+        """fallback_exit_code runs its own liveness check, under the same bash 5.3 quirk."""
+        if not shutil.which("sh"):
+            pytest.skip("needs sh")
+        (tmp_path / "bg.pid").write_text(pid)
+        (tmp_path / "bg.exit").write_text("6\n")
+
+        class ShEnv:
+            def execute(self, command, **kwargs):
+                out = subprocess.run(["sh", "-c", command], capture_output=True, timeout=30, check=False).stdout
+                return {"output": out.decode()}
+
+        q = lambda p: shlex.quote(str(p))
+        assert fallback_exit_code(ShEnv(), q(tmp_path / "bg.pid"), q(tmp_path / "bg.exit")) == 6
 
     @pytest.mark.parametrize("pid", ["", "abc\n", " \n"])
     @pytest.mark.parametrize("shell", [["sh", "-c"], ["bash", "-c"], ["bash", "--posix", "-c"], ["dash", "-c"]])
