@@ -1712,6 +1712,26 @@ def _dequoted_escape(char: str, quote: str | None) -> str:
     return char if quote is None or char in '$`"\\' else "\\" + char
 
 
+# git's global options (git.c handle_options) stand between `git` and its subcommand, so
+# `git -C ~/repo checkout main` met no `*git checkout*` deny rule (2026-11-27 cron review: the 11-26
+# experiment-design prompts send cron into project repos with `git -C`). Dropped wherever `git` stands in
+# the text, the way the deny globs themselves match anywhere, so `eval`, `xargs`, `ssh host '…'` and
+# `submodule foreach` carry it too. An option that takes the next word consumes it and is never re-read
+# as a bare flag, so `git -C checkout status` (a repo named "checkout") stays `git status`.
+# Only git's own flags count, so `grep -n -e git -e checkout notes.md` is not read as git (review 2026-11-27).
+_GIT_OPTIONS_WITH_ARG = r"(?:-C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--shallow-file|--attr-source)"
+_GIT_FLAGS = (r"(?:-p|-P|--paginate|--no-pager|--bare|--no-replace-objects|--no-lazy-fetch|--no-optional-locks"
+              r"|--no-advice|--(?:literal|glob|noglob|icase)-pathspecs|--exec-path(?:=\S+)?"
+              r"|--(?:git-dir|work-tree|namespace|config-env|super-prefix|shallow-file|attr-source)=\S+)(?=\s|$)")
+_GIT_GLOBAL_OPTIONS_RE = re.compile(
+    rf"\bgit(?>\s+(?:{_GIT_OPTIONS_WITH_ARG}\s+(?:[^\s'\"]*'[^']*'\S*|[^\s'\"]*\"[^\"]*\"\S*|\S+)|{_GIT_FLAGS}))+(?=\s)")
+
+
+def git_global_options_dropped(command: str) -> str:
+    """The command with git's global options removed after every `git` word (unchanged if none)."""
+    return _GIT_GLOBAL_OPTIONS_RE.sub("git", command)
+
+
 def _deny_command_variants(command: str):
     """Add executable projections without reparsing normalized argument data.
 

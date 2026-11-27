@@ -168,6 +168,43 @@ def test_deny_projection_preserves_data_and_path_rules(deny_config):
     for unresolved in ('${NAME}', '"${NAME}"', r'"a\cb"', r'a\qb', "'unclosed"):
         assert _split_env_string(unresolved) is None
 
+def test_git_global_options_do_not_hide_the_subcommand(deny_config):
+    """2026-11-27 cron review: `git -C <repo> checkout` slid past `*git checkout*` (the guard and the
+    nightly command audit both missed it). git's global options are dropped wherever `git` stands, as
+    the globs match anywhere; an option's value is never read as the subcommand."""
+    deny_config(["*git checkout*", "*git switch*", "*git stash*", "*git reset --hard*", "git status"])
+    for command, rule in (
+        ("git -C ~/repo checkout main", "*git checkout*"),
+        ("git -C '/my repo' checkout x", "*git checkout*"),
+        ('git -c core.pager="less -R" checkout x', "*git checkout*"),
+        ("git -c core.x=1 -C r switch dev", "*git switch*"),
+        ("git --git-dir=/r/.git --work-tree /r checkout -- f", "*git checkout*"),
+        ("timeout 30 git -C ~/r stash", "*git stash*"),
+        ("cd r && git --no-pager -C . reset --hard HEAD", "*git reset --hard*"),
+        ("bash -c 'git -C r checkout x'", "*git checkout*"),
+        ("eval git -C r checkout x", "*git checkout*"),
+        ("xargs -I{} git -C {} checkout x", "*git checkout*"),
+        ("flock /tmp/l git -C r checkout x", "*git checkout*"),
+        ("ssh host 'git -C r checkout x'", "*git checkout*"),
+        ("git -C r submodule foreach 'git -C . switch main'", "*git switch*"),
+        ("git -C r che\\\nckout x", "*git checkout*"),
+        # the same as `echo git checkout x`, which the anywhere-match of the glob already blocks
+        ("echo git -C r checkout x", "*git checkout*"),
+        (r"grep -E 'git -C \S+ checkout' audit.log", "*git checkout*"),   # as `grep 'git checkout' f` is
+        ("git -C checkout status", "git status"),
+        ("git -P -c x=1 stash", "*git stash*"),
+        ("git --bare --git-dir=/r.git switch m", "*git switch*"),
+    ):
+        assert approval_floors._match_user_deny_rule(command) == rule, command
+    for command in ("git -C ~/repo ls-tree abc123 src/", "git -C ~/repo grep -n checkout abc123",
+                    "git -C ~/r show HEAD:checkout.py", "git -C ~/r log --oneline -5", "git -C ~/r diff stash@{0}",
+                    "git -C", "git -C ~/r", "legit -C r checkout x", "git-lfs -C r checkout x",
+                    # only git's own flags count: these name git as data (2026-11-27 review)
+                    "grep -n -e git -e checkout notes.md", "rg -e git -e switch src/",
+                    "find . -name git -prune -o -name stash -print", "cat git -n checkout.txt"):
+        assert approval_floors._match_user_deny_rule(command) is None, command
+
+
 class TestDenyBeatsYolo:
     def test_deny_blocks_under_yolo_env(self, deny_config, clean_env, monkeypatch):
         deny_config(["git push --force*"])
