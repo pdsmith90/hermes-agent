@@ -201,6 +201,17 @@ def test_git_global_options_do_not_hide_the_subcommand(deny_config):
         ("git -c 'alias.sw=switch' -C r sw dev", "*git switch*"),
         ("git -c alias.st='stash push' st", "*git stash*"),
         ("git -c alias.x='!git checkout' x main", "*git checkout*"),
+        # git ignores an alias named after a builtin: the builtin runs, so the rule must still match
+        ("git -c alias.checkout=log checkout main", "*git checkout*"),
+        ("git -c alias.stash=log stash", "*git stash*"),
+        ("git -C r -c alias.checkout=status checkout x", "*git checkout*"),
+        # a quoted subcommand behind a wrapper the parser does not read as a command word
+        ("xargs -I{} git -C {} 'checkout' x", "*git checkout*"),
+        ("flock /tmp/l git -C r 'checkout' x", "*git checkout*"),
+        ("watch git -C r 'stash'", "*git stash*"),
+        ("ssh host git -C r 'checkout' x", "*git checkout*"),
+        ("git -C r submodule foreach git -C . 'checkout' main", "*git checkout*"),
+        ("find . -execdir git -C .. \"checkout\" x \\;", "*git checkout*"),
     ):
         assert approval_floors._match_user_deny_rule(command) == rule, command
     for command in ("git -C ~/repo ls-tree abc123 src/", "git -C ~/repo grep -n checkout abc123",

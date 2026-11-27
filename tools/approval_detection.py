@@ -1717,7 +1717,9 @@ def _dequoted_escape(char: str, quote: str | None) -> str:
 # experiment-design prompts send cron into project repos with `git -C`). The deny variants carry a copy
 # with them dropped. Only git's own flags and value options count, so `grep -n -e git -e checkout f` is
 # not read as git, and an option that takes the next word consumes it, so `git -C checkout status` (a
-# repo named "checkout") stays `git status`. An inline alias (`-c alias.co=checkout co`) is expanded.
+# repo named "checkout") stays `git status`. A quoted subcommand is dequoted (`git -C r 'checkout'`). An
+# inline alias (`-c alias.co=checkout co`) adds an expanded copy; the plain one is always kept, since git
+# ignores an alias named after a builtin (`-c alias.checkout=log checkout` runs checkout).
 _GIT_OPTIONS_WITH_ARG = r"(?:-C|-c|--git-dir|--work-tree|--namespace|--config-env|--super-prefix|--shallow-file|--attr-source)"
 _GIT_FLAGS = (r"(?:-p|-P|--paginate|--no-pager|--bare|--no-replace-objects|--no-lazy-fetch|--no-optional-locks"
               r"|--no-advice|--(?:literal|glob|noglob|icase)-pathspecs|--exec-path(?:=\S+)?"
@@ -1725,27 +1727,35 @@ _GIT_FLAGS = (r"(?:-p|-P|--paginate|--no-pager|--bare|--no-replace-objects|--no-
 _GIT_OPTION_VALUE = r"(?:[^\s'\"]*'[^']*'\S*|[^\s'\"]*\"[^\"]*\"\S*|\S+)"
 _GIT_GLOBAL_OPTIONS_RE = re.compile(
     rf"\bgit(?P<opts>(?>\s+(?:{_GIT_OPTIONS_WITH_ARG}\s+{_GIT_OPTION_VALUE}|{_GIT_FLAGS}))+)"
-    r"(?P<sp>\s+)(?P<sub>[^\s;&|()<>'\"]*)")
+    r"(?P<sp>\s+)(?P<sub>(?:[^\s;&|()<>'\"]|'[^']*'|\"[^\"]*\")*)")
 _GIT_INLINE_ALIAS_RE = re.compile(rf"(?:^|\s)-c\s+(?P<value>{_GIT_OPTION_VALUE})")
 
 
-def _git_projection(m: re.Match) -> str:
-    aliases = {}
-    for a in _GIT_INLINE_ALIAS_RE.finditer(m.group("opts")):
-        key, eq, value = a.group("value").replace("'", "").replace('"', "").partition("=")
-        if eq and key.lower().startswith("alias."):
-            aliases[key[len("alias."):].lower()] = value
-    sub = m.group("sub")
-    return "git" + m.group("sp") + aliases.get(sub.lower(), sub)
+def _git_projection(m: re.Match, expand_aliases: bool) -> str:
+    sub = m.group("sub").replace("'", "").replace('"', "")
+    if expand_aliases:
+        aliases = {}
+        for a in _GIT_INLINE_ALIAS_RE.finditer(m.group("opts")):
+            key, eq, value = a.group("value").replace("'", "").replace('"', "").partition("=")
+            if eq and key.lower().startswith("alias."):
+                aliases[key[len("alias."):].lower()] = value
+        sub = aliases.get(sub.lower(), sub)
+    return "git" + m.group("sp") + sub
 
 
-def git_global_options_dropped(command: str, *, anchored: bool = False) -> str:
-    """The command with git's global options removed after every `git` word (unchanged if none).
-    ``anchored``: only a `git` at the very start counts."""
-    if anchored:
-        m = _GIT_GLOBAL_OPTIONS_RE.match(command)
-        return command if m is None else _git_projection(m) + command[m.end():]
-    return _GIT_GLOBAL_OPTIONS_RE.sub(_git_projection, command)
+def git_global_options_dropped(command: str, *, anchored: bool = False) -> tuple[str, ...]:
+    """The command with git's global options removed after every `git` word, plain and with inline
+    aliases expanded (empty when there are none). ``anchored``: only a `git` at the very start counts."""
+    out = []
+    for expand in (False, True):
+        if anchored:
+            m = _GIT_GLOBAL_OPTIONS_RE.match(command)
+            projected = command if m is None else _git_projection(m, expand) + command[m.end():]
+        else:
+            projected = _GIT_GLOBAL_OPTIONS_RE.sub(lambda m: _git_projection(m, expand), command)
+        if projected != command:
+            out.append(projected)
+    return tuple(dict.fromkeys(out))
 
 
 def _deny_command_variants(command: str):
@@ -1757,9 +1767,7 @@ def _deny_command_variants(command: str):
     """
     for variant in _command_detection_variants(command, floors=True):
         yield variant
-        projected = git_global_options_dropped(variant)
-        if projected != variant:
-            yield projected
+        yield from git_global_options_dropped(variant)
     # Heredoc bodies are masked first, then ANSI-C expanded: `$'...'` inside a body is literal data.
     pending = list(dict.fromkeys(
         expand_ansi_c_quotes(source) for source in heredoc_scan_sources(command, _SHELL_NAMES_RE, floors=True)))
@@ -1800,14 +1808,9 @@ def _deny_command_variants(command: str):
                 # stands; in the dequoted one only when this word is git, since removing the quotes
                 # glues a quoted pattern to the next word (`grep -n "git -C" -A3 checkout.sh`).
                 for form in (candidate, normalized):
-                    projected = git_global_options_dropped(form)
-                    if projected != form:
-                        yield projected
+                    yield from git_global_options_dropped(form)
                 if os.path.basename(name).lower() == "git":
-                    dequoted = "git" + "".join(bare)
-                    projected = git_global_options_dropped(dequoted, anchored=True)
-                    if projected != dequoted:
-                        yield projected
+                    yield from git_global_options_dropped("git" + "".join(bare), anchored=True)
             if os.path.basename(executable) == "env":
                 tokens = _shell_segment_tokens(segment, 0)
                 if tokens:
